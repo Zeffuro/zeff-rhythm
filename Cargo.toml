@@ -1,0 +1,20 @@
+[package]
+name = "zeff-rhythm"
+version = "0.1.0"
+edition = "2024"
+default-run = "zeff-rhythm"
+
+[[bin]]
+name = "zeff-rhythm"
+path = "src/main.rs"
+
+[workspace]
+members = ["crates/rhythm-core"]
+resolver = "3"
+
+[dependencies]
+cpal = "0.18.1"
+crossterm = "0.29.0"
+rhythm-core = { path = "crates/rhythm-core" }
+sdl3 = { version = "0.18.4", features = ["build-from-source-static"] }
+symphonia = { version = "0.6.0", default-features = false, features = ["mpa", "ogg", "pcm", "vorbis", "wav"] }
