@@ -15,14 +15,41 @@ pub struct Command {
 const COMMANDS: &[Command] = &[
     Command {
         name: "app",
-        usage: "app",
-        summary: "Open the native app shell.",
+        usage: "app [--preview|--calibration] [--max-seconds S] [--width PX] [--height PX] [--present fifo|mailbox|immediate] [--frame-latency 1..3] [--power high|low|none]",
+        summary: "Open the single-window winit/wgpu app shell.",
         details: &[
             "This is the default when running without arguments.",
+            "Use --preview to start directly on the local chart in the same wgpu window.",
+            "Use --calibration to start a generated one-lane click test; press D on each click.",
             "Use Up/Down or W/S to move, Enter/Space to open, Esc/Backspace to go back, and Q to quit.",
-            "The current shell is a first navigable scaffold; gameplay still lives in play-map.",
+            "Gameplay uses D/F/J/K, CPAL audio, receipt-time winit input, core judgement, and app-session event logs.",
+            "SDL play-map remains the timestamp-quality regression harness until winit/raw input is validated.",
+        ],
+        handler: super::app_wgpu::run,
+    },
+    Command {
+        name: "app-sdl",
+        usage: "app-sdl",
+        summary: "Open the legacy SDL app scaffold.",
+        details: &[
+            "This shell is kept as a simple native/menu diagnostic path.",
+            "The default app path is now the single-window winit/wgpu shell.",
         ],
         handler: super::app_window::run,
+    },
+    Command {
+        name: "app-wgpu",
+        usage: "app-wgpu [--preview|--calibration] [--max-seconds S] [--width PX] [--height PX] [--present fifo|mailbox|immediate] [--frame-latency 1..3] [--power high|low|none]",
+        summary: "Open the single-window winit/wgpu app shell.",
+        details: &[
+            "Alias for the default app renderer path while the command name remains useful for diagnostics.",
+            "Use --preview to start directly on the local chart in the same wgpu window.",
+            "Use --calibration to start a generated one-lane click test; press D on each click.",
+            "Navigation uses the same broad controls as app: arrows or W/S, Enter/Space, Esc/Backspace, Q.",
+            "Gameplay uses D/F/J/K, CPAL audio, receipt-time winit input, core judgement, and app-session event logs.",
+            "SDL play-map remains the timestamp-quality regression harness until winit/raw input is validated.",
+        ],
+        handler: super::app_wgpu::run,
     },
     Command {
         name: "smoke",
@@ -90,7 +117,7 @@ const COMMANDS: &[Command] = &[
         details: &[
             "Reads logs written by play-map --event-log.",
             "Aggregates hit delta, absolute hit error, input queue age, ratings, misses, and unmatched inputs.",
-            "The suggested input offset adjustment is the negative mean signed hit delta.",
+            "Prints both negative mean and robust 10% trimmed mean input offset suggestions.",
         ],
         handler: super::run_analysis::run,
     },
@@ -135,6 +162,29 @@ const COMMANDS: &[Command] = &[
         ],
         handler: super::sdl_input_probe::run,
     },
+    Command {
+        name: "wgpu-smoke",
+        usage: "wgpu-smoke [--frames N] [--width PX] [--height PX] [--present fifo|mailbox|immediate] [--frame-latency 1..3] [--power high|low|none]",
+        summary: "Open a winit/wgpu surface and render measured clear frames.",
+        details: &[
+            "Exercises the planned app-owned gameplay renderer path without audio or chart logic.",
+            "Prints adapter/backend, surface format, requested/selected present mode, frame latency, and frame timing metrics.",
+            "Use --present fifo for the default latency-safe path; Mailbox and Immediate are selected only when the surface reports support.",
+            "This is a renderer smoke test, not the final game view.",
+        ],
+        handler: super::wgpu_smoke::run,
+    },
+    Command {
+        name: "wgpu-preview",
+        usage: "wgpu-preview [chart-path] [--format auto|osu|sm] [--max-seconds S] [--lookahead-seconds S] [--width PX] [--height PX] [--present fifo|mailbox|immediate] [--frame-latency 1..3] [--power high|low|none]",
+        summary: "Render a real chart highway through the winit/wgpu path without audio/input.",
+        details: &[
+            "Defaults to the local Speedcore StepMania fixture when no chart path is supplied.",
+            "Uses the shared chart parser and shared highway render-data path.",
+            "This is the shared chart renderer used by the CLI and app shell; live audio/input still stay in play-map or the SDL app handoff for now.",
+        ],
+        handler: super::wgpu_preview::run,
+    },
 ];
 
 pub fn run() -> CommandResult {
@@ -144,7 +194,7 @@ pub fn run() -> CommandResult {
 
 fn dispatch(args: &[String]) -> CommandResult {
     let Some(name) = args.first() else {
-        return super::app_window::run(&[]);
+        return super::app_wgpu::run(&[]);
     };
 
     if is_help(name) {
@@ -174,7 +224,7 @@ fn print_help() {
     println!("  zeff-rhythm");
     println!("  zeff-rhythm <command> [args]");
     println!();
-    println!("Running without a command opens the native app shell.");
+    println!("Running without a command opens the single-window winit/wgpu app shell.");
     println!();
     println!("Commands:");
 

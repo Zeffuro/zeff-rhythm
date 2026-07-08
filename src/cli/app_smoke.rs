@@ -26,9 +26,15 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         lane_bindings(&state)
     );
     println!(
-        "video fullscreen={} vsync={} target_fps={} lookahead_seconds={:.3}",
+        "video fullscreen={} vsync={} present={} frame_latency={} target_fps={} lookahead_seconds={:.3}",
         state.settings.video.fullscreen,
         state.settings.video.vsync,
+        state.settings.video.render_latency.present_mode.as_str(),
+        state
+            .settings
+            .video
+            .render_latency
+            .desired_maximum_frame_latency,
         optional_u32(state.settings.video.target_frame_rate),
         state.settings.video.lookahead_seconds
     );

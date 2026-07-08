@@ -1,4 +1,8 @@
-#[derive(Clone, Debug, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+use crate::render::settings::{RenderLatencySettings, RenderPresentModePreference};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub audio: AudioSettings,
     pub input: InputSettings,
@@ -19,7 +23,7 @@ impl Default for AppSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioSettings {
     pub host: Option<String>,
     pub device_id: Option<String>,
@@ -28,7 +32,7 @@ pub struct AudioSettings {
     pub buffer_frames: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InputSettings {
     pub backend: InputBackendPreference,
     pub lane_bindings: [LaneBinding; 4],
@@ -50,13 +54,13 @@ impl Default for InputSettings {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputBackendPreference {
     Sdl,
     TerminalDebug,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneBinding {
     pub lane: u8,
     pub source: InputBindingSource,
@@ -73,17 +77,18 @@ impl LaneBinding {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputBindingSource {
     KeyboardScancode,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoSettings {
     pub fullscreen: bool,
     pub vsync: bool,
     pub target_frame_rate: Option<u32>,
     pub lookahead_seconds: f64,
+    pub render_latency: RenderLatencySettings,
 }
 
 impl Default for VideoSettings {
@@ -93,11 +98,15 @@ impl Default for VideoSettings {
             vsync: true,
             target_frame_rate: Some(60),
             lookahead_seconds: 4.0,
+            render_latency: RenderLatencySettings {
+                present_mode: RenderPresentModePreference::Fifo,
+                desired_maximum_frame_latency: 1,
+            },
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GameplaySettings {
     pub lead_in_seconds: f64,
     pub scroll_speed: f64,
@@ -114,7 +123,7 @@ impl Default for GameplaySettings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticsSettings {
     pub event_log_enabled: bool,
     pub runtime_metrics_enabled: bool,

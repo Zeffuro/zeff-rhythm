@@ -1,4 +1,5 @@
 mod app_smoke;
+mod app_wgpu;
 mod app_window;
 mod args;
 mod audio_commands;
@@ -9,5 +10,7 @@ mod play_map;
 mod run_analysis;
 mod sdl_input_probe;
 mod smoke;
+mod wgpu_preview;
+mod wgpu_smoke;
 
 pub use commands::run;

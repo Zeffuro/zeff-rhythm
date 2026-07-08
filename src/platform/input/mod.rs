@@ -54,6 +54,8 @@ impl NativeInputBackend {
 #[derive(Clone, Copy, Debug)]
 pub struct NativeInputEvent {
     pub kind: NativeInputEventKind,
+    pub source: NativeInputSource,
+    pub timestamp_kind: NativeInputTimestampKind,
     pub event_time: Instant,
     pub received_time: Instant,
     pub source_timestamp_ns: Option<u64>,
@@ -67,4 +69,36 @@ pub enum NativeInputEventKind {
     FocusGained,
     FocusLost,
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeInputSource {
+    Terminal,
+    Sdl,
+    Winit,
+}
+
+impl NativeInputSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Sdl => "sdl",
+            Self::Winit => "winit",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeInputTimestampKind {
+    ReceiptTime,
+    SourceEventTime,
+}
+
+impl NativeInputTimestampKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReceiptTime => "receipt_time",
+            Self::SourceEventTime => "source_event_time",
+        }
+    }
 }

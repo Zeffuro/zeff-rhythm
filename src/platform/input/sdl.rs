@@ -1,4 +1,4 @@
-use super::{NativeInputEvent, NativeInputEventKind};
+use super::{NativeInputEvent, NativeInputEventKind, NativeInputSource, NativeInputTimestampKind};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::pixels::Color;
@@ -119,6 +119,8 @@ pub fn translate_sdl_event(clock: SdlTimestampClock, event: Event) -> Option<Nat
 
     Some(NativeInputEvent {
         kind,
+        source: NativeInputSource::Sdl,
+        timestamp_kind: NativeInputTimestampKind::SourceEventTime,
         event_time,
         received_time,
         source_timestamp_ns: Some(timestamp),

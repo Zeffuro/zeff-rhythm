@@ -3,12 +3,13 @@ use super::state::{AppScreen, AppState, SettingsPanel};
 use super::ui_text::{draw_text, text_height};
 use crate::platform::audio::{AudioDeviceSelection, list_output_devices};
 use crate::play::{
-    PlaySessionOptions, PlaySessionPreview, PreparedPlaySessionSummary, load_play_session_preview,
-    prepare_play_session, run_play_session,
+    PlaySessionOptions, PlaySessionPreview, PreparedPlaySessionSummary, WgpuPreviewRunOptions,
+    load_play_session_preview, prepare_play_session, run_play_session, run_wgpu_preview,
 };
 use crate::render::highway::{
     HighwayNoteSpriteKind, HighwayRenderLayout, build_highway_note_sprites,
 };
+use crate::render::settings::clamp_desired_frame_latency;
 use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::pixels::Color;
@@ -55,6 +56,29 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     }
                     Err(error) => {
                         println!("app_play_error={error}");
+                        shell.state.open_song_select();
+                    }
+                }
+            }
+            ShellExit::Preview(options) => {
+                let latency = shell.state.settings.video.render_latency;
+                let chart_path = options.chart_path.clone();
+                let run_options = WgpuPreviewRunOptions::new(options).with_latency(latency);
+
+                println!(
+                    "app_wgpu_preview_start chart={} present={} frame_latency={}",
+                    chart_path.display(),
+                    latency.present_mode.as_str(),
+                    latency.desired_maximum_frame_latency
+                );
+
+                match run_wgpu_preview(run_options) {
+                    Ok(()) => {
+                        println!("app_wgpu_preview_finished=true");
+                        shell.state.screen = AppScreen::Results;
+                    }
+                    Err(error) => {
+                        println!("app_wgpu_preview_error={error}");
                         shell.state.open_song_select();
                     }
                 }
@@ -108,6 +132,7 @@ struct NativeAppShell {
 enum ShellExit {
     Quit,
     Play(PlaySessionOptions),
+    Preview(PlaySessionOptions),
 }
 
 impl NativeAppShell {
@@ -198,6 +223,12 @@ impl NativeAppShell {
             }
             AppScreen::Gameplay => {
                 if matches_key(keycode, scancode, KeyIntent::Confirm)
+                    && let Some(options) = self.pending_session_options.clone()
+                {
+                    return Ok(Some(ShellExit::Preview(options)));
+                }
+
+                if matches_key(keycode, scancode, KeyIntent::PlayLive)
                     && let Some(options) = self.pending_session_options.clone()
                 {
                     return Ok(Some(ShellExit::Play(options)));
@@ -576,7 +607,8 @@ impl NativeAppShell {
             } else {
                 draw_empty_lanes(canvas, width, height, 4)?;
             }
-            draw_text(canvas, 96, 222, "TEMP SDL PLAY WINDOW", 2, MUTED_TEXT)?;
+            draw_text(canvas, 96, 222, "WGPU CHART PREVIEW READY", 2, MUTED_TEXT)?;
+            draw_text(canvas, 96, 252, "P LIVE SDL HARNESS", 2, MUTED_TEXT)?;
         } else {
             draw_empty_lanes(canvas, width, height, 4)?;
             draw_text(canvas, 96, 84, "NO SESSION", 2, MUTED_TEXT)?;
@@ -812,6 +844,7 @@ enum KeyIntent {
     Left,
     Right,
     Confirm,
+    PlayLive,
     Back,
     Quit,
 }
@@ -840,6 +873,10 @@ fn matches_key(keycode: Option<Keycode>, scancode: Option<Scancode>, intent: Key
                 | (Some(Keycode::Space), _)
                 | (_, Some(Scancode::Return))
                 | (_, Some(Scancode::Space))
+        ),
+        KeyIntent::PlayLive => matches!(
+            (keycode, scancode),
+            (Some(Keycode::P), _) | (_, Some(Scancode::P))
         ),
         KeyIntent::Back => matches!(
             (keycode, scancode),
@@ -1012,8 +1049,10 @@ fn settings_row_label(panel: SettingsPanel, row_index: usize) -> &'static str {
         (SettingsPanel::Input, 2) => "OFFSET",
         (SettingsPanel::Input, 3) => "OFFSET COARSE",
         (SettingsPanel::Video, 1) => "MODE",
-        (SettingsPanel::Video, 2) => "FPS",
-        (SettingsPanel::Video, 3) => "LOOKAHEAD",
+        (SettingsPanel::Video, 2) => "PRESENT",
+        (SettingsPanel::Video, 3) => "LATENCY",
+        (SettingsPanel::Video, 4) => "FPS",
+        (SettingsPanel::Video, 5) => "LOOKAHEAD",
         (SettingsPanel::Gameplay, 1) => "LEAD IN",
         (SettingsPanel::Gameplay, 2) => "SCROLL",
         (SettingsPanel::Gameplay, 3) => "JUDGEMENT",
@@ -1027,10 +1066,8 @@ fn settings_row_label(panel: SettingsPanel, row_index: usize) -> &'static str {
 fn settings_row_count(panel: SettingsPanel) -> usize {
     match panel {
         SettingsPanel::Audio => 4,
-        SettingsPanel::Input
-        | SettingsPanel::Video
-        | SettingsPanel::Gameplay
-        | SettingsPanel::Diagnostics => 3,
+        SettingsPanel::Video => 5,
+        SettingsPanel::Input | SettingsPanel::Gameplay | SettingsPanel::Diagnostics => 3,
     }
 }
 
@@ -1083,6 +1120,23 @@ fn draw_settings_body(
                 } else {
                     "WINDOWED"
                 }
+            ),
+            format!(
+                "PRESENT {}",
+                state
+                    .settings
+                    .video
+                    .render_latency
+                    .present_mode
+                    .display_label()
+            ),
+            format!(
+                "FRAME LATENCY {}",
+                state
+                    .settings
+                    .video
+                    .render_latency
+                    .desired_maximum_frame_latency
             ),
             format!(
                 "TARGET FPS {}",
@@ -1208,13 +1262,37 @@ fn adjust_setting(state: &mut AppState, panel: SettingsPanel, row_index: usize, 
             state.settings.video.fullscreen = !state.settings.video.fullscreen;
         }
         (SettingsPanel::Video, 2) => {
+            state.settings.video.render_latency.present_mode = if direction < 0 {
+                state.settings.video.render_latency.present_mode.previous()
+            } else {
+                state.settings.video.render_latency.present_mode.next()
+            };
+            state.settings.video.vsync = !matches!(
+                state.settings.video.render_latency.present_mode,
+                crate::render::settings::RenderPresentModePreference::Immediate
+            );
+        }
+        (SettingsPanel::Video, 3) => {
+            let current = state
+                .settings
+                .video
+                .render_latency
+                .desired_maximum_frame_latency;
+            let next = (current as i32 - 1 + direction).rem_euclid(3) as u32 + 1;
+            state
+                .settings
+                .video
+                .render_latency
+                .desired_maximum_frame_latency = clamp_desired_frame_latency(next);
+        }
+        (SettingsPanel::Video, 4) => {
             state.settings.video.target_frame_rate = cycle_option_u32(
                 state.settings.video.target_frame_rate,
                 &[None, Some(60), Some(120), Some(144), Some(240)],
                 direction,
             );
         }
-        (SettingsPanel::Video, 3) => {
+        (SettingsPanel::Video, 5) => {
             state.settings.video.lookahead_seconds =
                 (state.settings.video.lookahead_seconds + direction as f64 * 0.25).clamp(1.0, 10.0);
         }

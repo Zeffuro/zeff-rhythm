@@ -1,5 +1,6 @@
-use super::metrics::print_metric;
+use super::metrics::{MetricStats, print_metric};
 use crate::platform::input::NativeInputEvent;
+use crate::render::telemetry::{RenderTelemetry, RenderTimingSample};
 use rhythm_core::JudgementResult;
 use std::error::Error;
 use std::fs::{File, create_dir_all};
@@ -22,6 +23,29 @@ pub struct PlayReport {
     frame_time_ms: Vec<f64>,
     render_cost_ms: Vec<f64>,
     audio_output_latency_ms: Vec<f64>,
+    render_telemetry: RenderTelemetry,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlayReportSummary {
+    pub input_presses: usize,
+    pub input_releases: usize,
+    pub initial_focus_gained: usize,
+    pub initial_focus_lost: usize,
+    pub focus_gained: usize,
+    pub focus_lost: usize,
+    pub unmatched_inputs: usize,
+    pub hits: usize,
+    pub misses: usize,
+    pub hit_delta_ms: Option<MetricStats>,
+    pub hit_delta_samples_ms: Vec<f64>,
+    pub abs_hit_delta_ms: Option<MetricStats>,
+    pub input_queue_age_ms: Option<MetricStats>,
+    pub frame_time_ms: Option<MetricStats>,
+    pub render_cost_ms: Option<MetricStats>,
+    pub audio_output_latency_ms: Option<MetricStats>,
+    pub render_frame_samples: usize,
+    pub render_gpu_samples: usize,
 }
 
 impl PlayReport {
@@ -47,6 +71,7 @@ impl PlayReport {
             frame_time_ms: Vec::new(),
             render_cost_ms: Vec::new(),
             audio_output_latency_ms: Vec::new(),
+            render_telemetry: RenderTelemetry::default(),
         })
     }
 
@@ -135,6 +160,8 @@ impl PlayReport {
                 delta_ms: result.delta_seconds.map(|seconds| seconds * 1_000.0),
                 input_queue_age_ms: input.queue_age_ms,
                 input_timestamp_ns: input.source_timestamp_ns,
+                input_source: Some(input.source.as_str()),
+                input_timestamp_kind: Some(input.timestamp_kind.as_str()),
                 scheduled_time_seconds: Some(result.scheduled_time_seconds),
             })?;
         }
@@ -159,6 +186,8 @@ impl PlayReport {
                 delta_ms: None,
                 input_queue_age_ms: None,
                 input_timestamp_ns: None,
+                input_source: None,
+                input_timestamp_kind: None,
                 scheduled_time_seconds: Some(result.scheduled_time_seconds),
             })?;
         }
@@ -178,6 +207,11 @@ impl PlayReport {
         if render_cost_ms.is_finite() && render_cost_ms >= 0.0 {
             self.render_cost_ms.push(render_cost_ms);
         }
+        self.render_telemetry.record(RenderTimingSample {
+            frame_interval_ms: Some(frame_time_ms),
+            command_encode_ms: Some(render_cost_ms),
+            ..RenderTimingSample::default()
+        });
         self.record_audio_output_latency_seconds(audio_output_latency_seconds);
     }
 
@@ -214,6 +248,34 @@ impl PlayReport {
         print_metric("frame_time_ms", &self.frame_time_ms);
         print_metric("render_cost_ms", &self.render_cost_ms);
         print_metric("audio_output_latency_ms", &self.audio_output_latency_ms);
+        println!(
+            "render_telemetry frame_samples={} gpu_samples={}",
+            self.render_telemetry.frame_sample_count(),
+            self.render_telemetry.gpu_sample_count()
+        );
+    }
+
+    pub fn summary(&self) -> PlayReportSummary {
+        PlayReportSummary {
+            input_presses: self.input_presses,
+            input_releases: self.input_releases,
+            initial_focus_gained: self.initial_focus_gained,
+            initial_focus_lost: self.initial_focus_lost,
+            focus_gained: self.focus_gained,
+            focus_lost: self.focus_lost,
+            unmatched_inputs: self.unmatched_inputs,
+            hits: self.hit_delta_ms.len(),
+            misses: self.misses,
+            hit_delta_ms: MetricStats::from_samples(&self.hit_delta_ms),
+            hit_delta_samples_ms: self.hit_delta_ms.clone(),
+            abs_hit_delta_ms: MetricStats::from_samples(&self.abs_hit_delta_ms),
+            input_queue_age_ms: MetricStats::from_samples(&self.input_queue_age_ms),
+            frame_time_ms: MetricStats::from_samples(&self.frame_time_ms),
+            render_cost_ms: MetricStats::from_samples(&self.render_cost_ms),
+            audio_output_latency_ms: MetricStats::from_samples(&self.audio_output_latency_ms),
+            render_frame_samples: self.render_telemetry.frame_sample_count(),
+            render_gpu_samples: self.render_telemetry.gpu_sample_count(),
+        }
     }
 
     pub fn flush(&mut self) -> Result<(), Box<dyn Error>> {
@@ -247,6 +309,8 @@ impl PlayReport {
                 delta_ms: None,
                 input_queue_age_ms: input.queue_age_ms,
                 input_timestamp_ns: input.source_timestamp_ns,
+                input_source: Some(input.source.as_str()),
+                input_timestamp_kind: Some(input.timestamp_kind.as_str()),
                 scheduled_time_seconds: None,
             })?;
         }
@@ -270,6 +334,8 @@ impl PlayReport {
                 delta_ms: None,
                 input_queue_age_ms: input.queue_age_ms,
                 input_timestamp_ns: input.source_timestamp_ns,
+                input_source: Some(input.source.as_str()),
+                input_timestamp_kind: Some(input.timestamp_kind.as_str()),
                 scheduled_time_seconds: None,
             })?;
         }
@@ -292,6 +358,8 @@ impl PlayReport {
                 delta_ms: None,
                 input_queue_age_ms: None,
                 input_timestamp_ns: None,
+                input_source: None,
+                input_timestamp_kind: None,
                 scheduled_time_seconds: None,
             })?;
         }
@@ -316,7 +384,7 @@ impl EventLogWriter {
         let mut writer = BufWriter::new(File::create(path)?);
         writeln!(
             writer,
-            "event,chart_time_seconds,lane,note_id,rating,delta_ms,input_queue_age_ms,input_timestamp_ns,scheduled_time_seconds"
+            "event,chart_time_seconds,lane,note_id,rating,delta_ms,input_queue_age_ms,input_timestamp_ns,input_source,input_timestamp_kind,scheduled_time_seconds"
         )?;
 
         Ok(Self { writer })
@@ -325,7 +393,7 @@ impl EventLogWriter {
     fn write_row(&mut self, row: EventLogRow) -> Result<(), Box<dyn Error>> {
         writeln!(
             self.writer,
-            "{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             row.event,
             format_optional_f64(row.chart_time_seconds),
             format_optional_u8(row.lane),
@@ -334,6 +402,8 @@ impl EventLogWriter {
             format_optional_f64(row.delta_ms),
             format_optional_f64(row.input_queue_age_ms),
             format_optional_u64(row.input_timestamp_ns),
+            row.input_source.unwrap_or_default(),
+            row.input_timestamp_kind.unwrap_or_default(),
             format_optional_f64(row.scheduled_time_seconds),
         )?;
 
@@ -355,6 +425,8 @@ struct EventLogRow {
     delta_ms: Option<f64>,
     input_queue_age_ms: Option<f64>,
     input_timestamp_ns: Option<u64>,
+    input_source: Option<&'static str>,
+    input_timestamp_kind: Option<&'static str>,
     scheduled_time_seconds: Option<f64>,
 }
 

@@ -1,8 +1,9 @@
-use crate::play::metrics::MetricStats;
+use crate::play::metrics::{MetricStats, trimmed_mean};
 use std::error::Error;
 use std::fs;
 
-const EXPECTED_HEADER: &str = "event,chart_time_seconds,lane,note_id,rating,delta_ms,input_queue_age_ms,input_timestamp_ns,scheduled_time_seconds";
+const LEGACY_HEADER: &str = "event,chart_time_seconds,lane,note_id,rating,delta_ms,input_queue_age_ms,input_timestamp_ns,scheduled_time_seconds";
+const CURRENT_HEADER: &str = "event,chart_time_seconds,lane,note_id,rating,delta_ms,input_queue_age_ms,input_timestamp_ns,input_source,input_timestamp_kind,scheduled_time_seconds";
 
 #[derive(Default)]
 struct RunAnalysis {
@@ -49,9 +50,14 @@ fn analyze_file(path: &str) -> Result<RunAnalysis, Box<dyn Error>> {
     let header = lines
         .next()
         .ok_or_else(|| format!("empty event log: {path}"))?;
-    if header.trim_start_matches('\u{feff}') != EXPECTED_HEADER {
-        return Err(format!("unexpected event log header in {path}: {header}").into());
-    }
+    let header = header.trim_start_matches('\u{feff}');
+    let format = match header {
+        CURRENT_HEADER => EventLogFormat::Current,
+        LEGACY_HEADER => EventLogFormat::Legacy,
+        _ => {
+            return Err(format!("unexpected event log header in {path}: {header}").into());
+        }
+    };
 
     let mut analysis = RunAnalysis {
         files: 1,
@@ -63,7 +69,7 @@ fn analyze_file(path: &str) -> Result<RunAnalysis, Box<dyn Error>> {
             continue;
         }
 
-        let row = EventLogRow::parse(line)
+        let row = EventLogRow::parse(line, format)
             .map_err(|message| format!("{path}:{}: {message}", line_index + 2))?;
         analysis.record(row);
         analysis.rows += 1;
@@ -218,7 +224,7 @@ impl RunAnalysis {
             println!("{label}{path}=input events captured");
         } else if self.focus_gained + self.initial_focus_gained == 0 {
             println!(
-                "{label}{path}=no input presses and no focus_gained events; click/focus the SDL play window before pressing D/F/J/K"
+                "{label}{path}=no input presses and no focus_gained events; focus the play window before pressing D/F/J/K"
             );
         } else {
             println!(
@@ -252,31 +258,48 @@ fn print_offset_estimate(scope: &str, path: Option<&str>, hit_delta_ms: &[f64]) 
     let path = path.map(|path| format!(" file={path}")).unwrap_or_default();
     let Some(stats) = MetricStats::from_samples(hit_delta_ms) else {
         println!("{scope}_suggested_input_offset_adjustment_ms{path}=none");
+        println!("{scope}_robust_suggested_input_offset_adjustment_ms{path}=none");
         println!("{scope}_suggested_input_offset_reason{path}=no hit delta samples");
         return;
     };
+    let robust_mean = robust_hit_delta_mean_ms(hit_delta_ms).unwrap_or(stats.mean);
 
     println!(
         "{scope}_suggested_input_offset_adjustment_ms{path}={:.3}",
         -stats.mean
     );
     println!(
-        "{scope}_suggested_input_offset_reason{path}=mean hit_delta_ms was {:.3}; add this adjustment to that run's --input-offset-ms",
-        stats.mean
+        "{scope}_robust_suggested_input_offset_adjustment_ms{path}={:.3}",
+        -robust_mean
+    );
+    println!(
+        "{scope}_suggested_input_offset_reason{path}=mean hit_delta_ms was {:.3}, robust 10pct trimmed mean was {:.3}; add the chosen adjustment to that run's --input-offset-ms",
+        stats.mean, robust_mean
     );
 }
 
 fn print_aggregate_offset_note(hit_delta_ms: &[f64]) {
     let Some(stats) = MetricStats::from_samples(hit_delta_ms) else {
         println!("aggregate_suggested_input_offset_adjustment_ms=none");
+        println!("aggregate_robust_suggested_input_offset_adjustment_ms=none");
         println!("aggregate_suggested_input_offset_reason=no hit delta samples");
         return;
     };
+    let robust_mean = robust_hit_delta_mean_ms(hit_delta_ms).unwrap_or(stats.mean);
 
     println!("aggregate_mean_hit_delta_ms={:.3}", stats.mean);
+    println!("aggregate_robust_mean_hit_delta_ms={:.3}", robust_mean);
     println!(
-        "aggregate_suggested_input_offset_reason=multiple files may use different offsets; use file_suggested_input_offset_adjustment_ms for calibration"
+        "aggregate_robust_suggested_input_offset_adjustment_ms={:.3}",
+        -robust_mean
     );
+    println!(
+        "aggregate_suggested_input_offset_reason=multiple files may use different offsets; use file_suggested_input_offset_adjustment_ms or file_robust_suggested_input_offset_adjustment_ms for calibration"
+    );
+}
+
+fn robust_hit_delta_mean_ms(hit_delta_ms: &[f64]) -> Option<f64> {
+    trimmed_mean(hit_delta_ms, 0.10)
 }
 
 #[derive(Clone, Copy)]
@@ -287,11 +310,24 @@ struct EventLogRow<'a> {
     input_queue_age_ms: Option<f64>,
 }
 
+#[derive(Clone, Copy)]
+enum EventLogFormat {
+    Legacy,
+    Current,
+}
+
 impl<'a> EventLogRow<'a> {
-    fn parse(line: &'a str) -> Result<Self, String> {
+    fn parse(line: &'a str, format: EventLogFormat) -> Result<Self, String> {
         let columns: Vec<&str> = line.split(',').collect();
-        if columns.len() != 9 {
-            return Err(format!("expected 9 columns, got {}", columns.len()));
+        let expected_columns = match format {
+            EventLogFormat::Legacy => 9,
+            EventLogFormat::Current => 11,
+        };
+        if columns.len() != expected_columns {
+            return Err(format!(
+                "expected {expected_columns} columns, got {}",
+                columns.len()
+            ));
         }
 
         Ok(Self {
@@ -320,12 +356,15 @@ fn parse_optional_f64(value: &str, name: &str) -> Result<Option<f64>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventLogRow, RunAnalysis};
+    use super::{EventLogFormat, EventLogRow, RunAnalysis};
 
     #[test]
     fn parses_hit_rows() {
-        let row =
-            EventLogRow::parse("hit,1.000000,2,42,Perfect,-12.500,0.200,123,1.012500").unwrap();
+        let row = EventLogRow::parse(
+            "hit,1.000000,2,42,Perfect,-12.500,0.200,123,sdl,source_event_time,1.012500",
+            EventLogFormat::Current,
+        )
+        .unwrap();
 
         assert_eq!(row.event, "hit");
         assert_eq!(row.rating, Some("Perfect"));
@@ -337,9 +376,19 @@ mod tests {
     fn aggregates_hit_metrics() {
         let mut analysis = RunAnalysis::default();
         analysis.record(
-            EventLogRow::parse("hit,1.000000,2,42,Perfect,-12.500,0.200,123,1.012500").unwrap(),
+            EventLogRow::parse(
+                "hit,1.000000,2,42,Perfect,-12.500,0.200,123,sdl,source_event_time,1.012500",
+                EventLogFormat::Current,
+            )
+            .unwrap(),
         );
-        analysis.record(EventLogRow::parse("miss,1.200000,0,43,Miss,,,,1.000000").unwrap());
+        analysis.record(
+            EventLogRow::parse(
+                "miss,1.200000,0,43,Miss,,,,,,1.000000",
+                EventLogFormat::Current,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(analysis.hits, 1);
         assert_eq!(analysis.misses, 1);
@@ -350,16 +399,52 @@ mod tests {
     #[test]
     fn queue_age_uses_raw_input_rows_only() {
         let mut analysis = RunAnalysis::default();
-        analysis.record(EventLogRow::parse("input_press,1.000000,2,,,0.000,0.200,123,").unwrap());
         analysis.record(
-            EventLogRow::parse("hit,1.000000,2,42,Perfect,-12.500,0.200,123,1.012500").unwrap(),
+            EventLogRow::parse(
+                "input_press,1.000000,2,,,0.000,0.200,123,sdl,source_event_time,",
+                EventLogFormat::Current,
+            )
+            .unwrap(),
         );
-        analysis
-            .record(EventLogRow::parse("unmatched_input,1.200000,2,,,0.000,0.300,124,").unwrap());
+        analysis.record(
+            EventLogRow::parse(
+                "hit,1.000000,2,42,Perfect,-12.500,0.200,123,sdl,source_event_time,1.012500",
+                EventLogFormat::Current,
+            )
+            .unwrap(),
+        );
+        analysis.record(
+            EventLogRow::parse(
+                "unmatched_input,1.200000,2,,,0.000,0.300,124,sdl,source_event_time,",
+                EventLogFormat::Current,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(analysis.input_presses, 1);
         assert_eq!(analysis.hits, 1);
         assert_eq!(analysis.unmatched_inputs, 1);
         assert_eq!(analysis.input_queue_age_ms, vec![0.2]);
+    }
+
+    #[test]
+    fn parses_legacy_rows() {
+        let row = EventLogRow::parse(
+            "hit,1.000000,2,42,Perfect,-12.500,0.200,123,1.012500",
+            EventLogFormat::Legacy,
+        )
+        .unwrap();
+
+        assert_eq!(row.event, "hit");
+        assert_eq!(row.rating, Some("Perfect"));
+        assert_eq!(row.delta_ms, Some(-12.5));
+        assert_eq!(row.input_queue_age_ms, Some(0.2));
+    }
+
+    #[test]
+    fn robust_hit_delta_mean_trims_outliers() {
+        let mean = super::robust_hit_delta_mean_ms(&[-100.0, -2.0, 0.0, 2.0, 100.0]).unwrap();
+
+        assert_eq!(mean, 0.0);
     }
 }

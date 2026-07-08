@@ -1,4 +1,4 @@
-use super::{NativeInputEvent, NativeInputEventKind};
+use super::{NativeInputEvent, NativeInputEventKind, NativeInputSource, NativeInputTimestampKind};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::error::Error;
@@ -32,6 +32,8 @@ impl TerminalInputBackend {
             if let Some(kind) = key_event_kind(key.code, key.kind) {
                 output.push(NativeInputEvent {
                     kind,
+                    source: NativeInputSource::Terminal,
+                    timestamp_kind: NativeInputTimestampKind::ReceiptTime,
                     event_time: received_time,
                     received_time,
                     source_timestamp_ns: None,

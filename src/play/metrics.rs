@@ -42,6 +42,20 @@ impl MetricStats {
     }
 }
 
+pub fn trimmed_mean(samples: &[f64], trim_fraction: f64) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let trim_each_side = ((sorted.len() as f64 * trim_fraction.clamp(0.0, 0.45)).floor() as usize)
+        .min((sorted.len() - 1) / 2);
+    let trimmed = &sorted[trim_each_side..sorted.len() - trim_each_side];
+
+    Some(trimmed.iter().sum::<f64>() / trimmed.len() as f64)
+}
+
 pub fn print_metric(name: &str, samples: &[f64]) {
     let Some(stats) = MetricStats::from_samples(samples) else {
         println!("metric {name} count=0");
@@ -79,5 +93,12 @@ mod tests {
         assert_eq!(stats.min, -10.0);
         assert_eq!(stats.p50, 10.0);
         assert_eq!(stats.max, 20.0);
+    }
+
+    #[test]
+    fn calculates_trimmed_mean() {
+        let mean = super::trimmed_mean(&[-100.0, 0.0, 10.0, 20.0, 200.0], 0.2).unwrap();
+
+        assert_eq!(mean, 10.0);
     }
 }

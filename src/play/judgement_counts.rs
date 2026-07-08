@@ -1,6 +1,6 @@
 use rhythm_core::{HitRating, JudgementResult};
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JudgementCounts {
     pub marvelous: usize,
     pub perfect: usize,
