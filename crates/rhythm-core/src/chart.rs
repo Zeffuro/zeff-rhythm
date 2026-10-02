@@ -1,9 +1,32 @@
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChartMetadata {
     pub title: String,
     pub artist: String,
+    pub title_unicode: Option<String>,
+    pub artist_unicode: Option<String>,
     pub source: Option<String>,
+    pub difficulty: Option<String>,
     pub audio_filename: Option<String>,
+    pub background_filename: Option<String>,
+    pub banner_filename: Option<String>,
+    pub preview_start_seconds: Option<f64>,
+    pub preview_duration_seconds: Option<f64>,
+}
+
+impl ChartMetadata {
+    pub fn display_title(&self) -> &str {
+        self.title_unicode
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(&self.title)
+    }
+
+    pub fn display_artist(&self) -> &str {
+        self.artist_unicode
+            .as_deref()
+            .filter(|artist| !artist.trim().is_empty())
+            .unwrap_or(&self.artist)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
@@ -274,6 +297,23 @@ impl Chart {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_prefers_native_text_with_empty_and_missing_fallbacks() {
+        let mut metadata = ChartMetadata {
+            title: "Tsuki".to_owned(),
+            artist: "Hoshi".to_owned(),
+            title_unicode: Some("月".to_owned()),
+            artist_unicode: Some("星".to_owned()),
+            ..ChartMetadata::default()
+        };
+        assert_eq!(metadata.display_title(), "月");
+        assert_eq!(metadata.display_artist(), "星");
+        metadata.title_unicode = Some("   ".to_owned());
+        metadata.artist_unicode = None;
+        assert_eq!(metadata.display_title(), "Tsuki");
+        assert_eq!(metadata.display_artist(), "Hoshi");
+    }
 
     #[test]
     fn converts_between_beat_and_time() {

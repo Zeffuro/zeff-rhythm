@@ -63,10 +63,12 @@ pub fn generate_calibration_chart(pattern: CalibrationPattern) -> Chart {
     let note_count = pattern.note_count.max(1);
     let mut chart = Chart::new(lane_count);
     *chart.metadata_mut() = ChartMetadata {
+        difficulty: None,
         title: "Generated Calibration".to_owned(),
         artist: "zeff-rhythm".to_owned(),
         source: Some("generated".to_owned()),
         audio_filename: None,
+        ..ChartMetadata::default()
     };
     chart.set_timing_points(vec![TimingPoint::new(
         Beat::new(0.0),

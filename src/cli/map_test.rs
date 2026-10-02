@@ -3,7 +3,7 @@ use super::charts::{
     ChartFormat, hold_count, load_chart, parse_format_option, print_chart_summary,
 };
 use crate::play::JudgementCounts;
-use rhythm_core::{Chart, GameKey, InputEvent, JudgementWindows, RhythmEngine};
+use rhythm_core::{Chart, GameKey, InputEvent, JudgementWindows, NoteKind, RhythmEngine};
 use std::error::Error;
 
 pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -26,7 +26,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     println!("good={}", result.counts.good);
     println!("miss={}", result.counts.miss);
     println!("unmatched_inputs={}", result.unmatched_inputs);
-    println!("hold_starts_tested={}", hold_count(&chart));
+    println!("holds_tested={}", hold_count(&chart));
 
     Ok(())
 }
@@ -98,38 +98,67 @@ struct MapTestResult {
 
 fn simulate_autoplay(chart: &Chart, offset_seconds: f64) -> MapTestResult {
     let windows = JudgementWindows::default();
-    let notes = chart.notes().to_vec();
-    let end_time = notes
+    let mut inputs = Vec::new();
+    for note in chart.notes() {
+        inputs.push(InputEvent {
+            key: GameKey::Lane(note.lane),
+            pressed: true,
+            time_seconds: note.time_seconds + offset_seconds,
+        });
+        inputs.push(InputEvent {
+            key: GameKey::Lane(note.lane),
+            pressed: false,
+            time_seconds: match note.kind {
+                NoteKind::Tap => note.time_seconds + 0.001,
+                NoteKind::Hold { end_time_seconds } => end_time_seconds,
+            } + offset_seconds,
+        });
+    }
+    inputs.sort_by(|a, b| {
+        a.time_seconds
+            .total_cmp(&b.time_seconds)
+            .then(a.pressed.cmp(&b.pressed))
+    });
+    let chart_end = chart
+        .notes()
+        .iter()
+        .map(|note| match note.kind {
+            NoteKind::Tap => note.time_seconds,
+            NoteKind::Hold { end_time_seconds } => end_time_seconds,
+        })
+        .fold(0.0, f64::max);
+    let end_time = inputs
         .last()
-        .map(|note| note.time_seconds + windows.miss_seconds + offset_seconds.abs() + 1.0)
+        .map(|event| event.time_seconds.max(chart_end) + windows.miss_seconds + 1.0)
         .unwrap_or_default();
     let mut engine = RhythmEngine::new(chart.clone(), windows);
     let mut counts = JudgementCounts::default();
     let mut unmatched_inputs = 0;
     let mut misses = Vec::new();
 
-    for note in notes {
-        let input_time = note.time_seconds + offset_seconds;
-        let result = engine.submit_input(InputEvent {
-            key: GameKey::Lane(note.lane),
-            pressed: true,
-            time_seconds: input_time,
-        });
+    for event in inputs {
+        misses.clear();
+        engine.collect_judgements(event.time_seconds, &mut misses);
+        for result in misses.drain(..) {
+            counts.add(result);
+        }
+        let result = engine.submit_input(event);
 
         match result {
             Some(result) => counts.add(result),
-            None => unmatched_inputs += 1,
+            None if event.pressed => unmatched_inputs += 1,
+            None => {}
         }
 
         misses.clear();
-        engine.collect_misses(input_time, &mut misses);
+        engine.collect_judgements(event.time_seconds, &mut misses);
         for miss in misses.drain(..) {
             counts.add(miss);
         }
     }
 
     misses.clear();
-    engine.collect_misses(end_time, &mut misses);
+    engine.collect_judgements(end_time, &mut misses);
     for miss in misses {
         counts.add(miss);
     }
@@ -139,5 +168,35 @@ fn simulate_autoplay(chart: &Chart, offset_seconds: f64) -> MapTestResult {
         judged: engine.judged_count(),
         complete: engine.is_complete(),
         unmatched_inputs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rhythm_core::{LaneIndex, Note, NoteId};
+
+    #[test]
+    fn autoplay_holds_and_chords_complete_with_one_score_per_note() {
+        let mut chart = Chart::new(4);
+        chart.push_note(Note::hold(NoteId::new(1), LaneIndex::new(0), 1.0, 3.0));
+        chart.push_note(Note::tap(NoteId::new(2), LaneIndex::new(1), 1.0));
+        chart.push_note(Note::tap(NoteId::new(3), LaneIndex::new(0), 3.0));
+        let result = simulate_autoplay(&chart, 0.0);
+        assert!(result.complete);
+        assert_eq!(result.judged, 3);
+        assert_eq!(result.counts.marvelous, 3);
+        assert_eq!(result.unmatched_inputs, 0);
+    }
+
+    #[test]
+    fn large_negative_offsets_still_flush_every_missed_head() {
+        let mut chart = Chart::new(2);
+        chart.push_note(Note::hold(NoteId::new(1), LaneIndex::new(0), 1.0, 2.0));
+        chart.push_note(Note::tap(NoteId::new(2), LaneIndex::new(1), 1.0));
+        let result = simulate_autoplay(&chart, -2.0);
+        assert!(result.complete);
+        assert_eq!(result.judged, 2);
+        assert_eq!(result.counts.miss, 2);
     }
 }

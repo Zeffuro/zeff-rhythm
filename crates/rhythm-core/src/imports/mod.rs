@@ -5,4 +5,4 @@ mod util;
 
 pub use error::ImportError;
 pub use osu::parse_osu_mania;
-pub use stepmania::parse_stepmania_sm;
+pub use stepmania::{parse_stepmania_sm, parse_stepmania_sm_catalog, parse_stepmania_sm_chart};

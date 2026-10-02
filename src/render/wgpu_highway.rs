@@ -1,10 +1,8 @@
 use super::highway::{HighwayNoteSprite, HighwayNoteSpriteKind, HighwayRenderLayout};
 use super::wgpu_surface::{WgpuFrameError, WgpuSurfaceState};
 
-const TOP_PAD: f32 = 44.0;
-const BOTTOM_PAD: f32 = 92.0;
-const LANE_GAP: f32 = 8.0;
-const LINE_HEIGHT: f32 = 8.0;
+mod geometry;
+use geometry::{TOP_PAD, WgpuHighwayLayout, draw_lanes, draw_notes, draw_progress, push_rect};
 const VERTEX_FLOATS: usize = 6;
 const VERTEX_BYTES: usize = VERTEX_FLOATS * std::mem::size_of::<f32>();
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
@@ -96,12 +94,43 @@ impl WgpuHighwayRenderer {
         surface: &mut WgpuSurfaceState,
         frame: WgpuHighwayFrame<'_>,
     ) -> Result<WgpuHighwayRenderSample, WgpuFrameError> {
+        self.render_with_overlay(surface, frame, &[])
+    }
+
+    pub fn render_with_overlay(
+        &mut self,
+        surface: &mut WgpuSurfaceState,
+        frame: WgpuHighwayFrame<'_>,
+        overlay: &[super::wgpu_rects::WgpuRect],
+    ) -> Result<WgpuHighwayRenderSample, WgpuFrameError> {
+        self.render_with_overlay_and_artwork(surface, frame, overlay, None)
+    }
+
+    pub fn render_with_overlay_and_artwork(
+        &mut self,
+        surface: &mut WgpuSurfaceState,
+        frame: WgpuHighwayFrame<'_>,
+        overlay: &[super::wgpu_rects::WgpuRect],
+        artwork: Option<&super::wgpu_artwork::WgpuArtworkRenderer>,
+    ) -> Result<WgpuHighwayRenderSample, WgpuFrameError> {
         let surface_frame = surface.begin_frame()?;
         let acquire_surface_ms = surface_frame.acquire_surface_ms;
         let width = surface.config.width.max(1) as f32;
         let height = surface.config.height.max(1) as f32;
         let layout = WgpuHighwayLayout::new(width, height, frame.lane_count);
-        let vertex_count = self.build_vertices(&layout, width, height, frame);
+        self.build_vertices(&layout, width, height, frame);
+        for rect in overlay {
+            push_rect(
+                &mut self.vertex_bytes,
+                (width, height),
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                rect.color,
+            );
+        }
+        let vertex_count = self.vertex_bytes.len() / VERTEX_BYTES;
         self.ensure_vertex_capacity(&surface.device, vertex_count);
 
         if vertex_count > 0 {
@@ -139,6 +168,9 @@ impl WgpuHighwayRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(artwork) = artwork {
+                artwork.draw(&mut pass);
+            }
             if vertex_count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -220,39 +252,6 @@ pub fn wgpu_highway_render_layout(
     )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct WgpuHighwayLayout {
-    lane_count: usize,
-    lane_width: f32,
-    lane_start_x: f32,
-    judgement_y: f32,
-    height: f32,
-}
-
-impl WgpuHighwayLayout {
-    fn new(width: f32, height: f32, lane_count: usize) -> Self {
-        let lane_count = lane_count.max(1);
-        let usable_width = (width - 128.0).max(320.0);
-        let total_gap = LANE_GAP * lane_count.saturating_sub(1) as f32;
-        let lane_width = ((usable_width - total_gap) / lane_count as f32).clamp(52.0, 110.0);
-        let total_width = lane_width * lane_count as f32 + total_gap;
-        let lane_start_x = (width - total_width) * 0.5;
-        let judgement_y = height - BOTTOM_PAD;
-
-        Self {
-            lane_count,
-            lane_width,
-            lane_start_x,
-            judgement_y,
-            height,
-        }
-    }
-
-    fn lane_x(self, lane: usize) -> f32 {
-        self.lane_start_x + lane as f32 * (self.lane_width + LANE_GAP)
-    }
-}
-
 fn create_vertex_buffer(device: &wgpu::Device, vertex_capacity: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("zeff-rhythm highway vertices"),
@@ -260,261 +259,4 @@ fn create_vertex_buffer(device: &wgpu::Device, vertex_capacity: usize) -> wgpu::
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
-}
-
-fn draw_lanes(
-    bytes: &mut Vec<u8>,
-    layout: &WgpuHighwayLayout,
-    width: f32,
-    height: f32,
-    active_lanes: &[bool],
-) {
-    for lane in 0..layout.lane_count {
-        let x = layout.lane_x(lane);
-        let active = active_lanes.get(lane).copied().unwrap_or(false);
-        let lane_color = if active {
-            rgba(0.19, 0.24, 0.25, 1.0)
-        } else {
-            rgba(0.12, 0.14, 0.17, 1.0)
-        };
-        push_rect(
-            bytes,
-            (width, height),
-            x,
-            TOP_PAD,
-            layout.lane_width,
-            layout.judgement_y - TOP_PAD + 52.0,
-            lane_color,
-        );
-        push_rect(
-            bytes,
-            (width, height),
-            x,
-            layout.judgement_y,
-            layout.lane_width,
-            LINE_HEIGHT,
-            rgba(0.88, 0.86, 0.78, 1.0),
-        );
-        push_rect(
-            bytes,
-            (width, height),
-            x,
-            TOP_PAD,
-            1.0,
-            layout.height,
-            rgba(0.22, 0.25, 0.29, 1.0),
-        );
-        push_rect(
-            bytes,
-            (width, height),
-            x + layout.lane_width - 1.0,
-            TOP_PAD,
-            1.0,
-            layout.height,
-            rgba(0.22, 0.25, 0.29, 1.0),
-        );
-    }
-}
-
-fn draw_notes(
-    bytes: &mut Vec<u8>,
-    layout: &WgpuHighwayLayout,
-    width: f32,
-    height: f32,
-    sprites: &[HighwayNoteSprite],
-) {
-    for sprite in sprites {
-        match sprite.kind {
-            HighwayNoteSpriteKind::Tap => {
-                draw_tap(
-                    bytes,
-                    layout,
-                    width,
-                    height,
-                    sprite.lane,
-                    sprite.y,
-                    sprite.delta_seconds,
-                );
-            }
-            HighwayNoteSpriteKind::Hold { end_y } => {
-                draw_hold(
-                    bytes,
-                    layout,
-                    (width, height),
-                    sprite.lane,
-                    sprite.y,
-                    end_y,
-                    sprite.delta_seconds,
-                );
-            }
-        }
-    }
-}
-
-fn draw_tap(
-    bytes: &mut Vec<u8>,
-    layout: &WgpuHighwayLayout,
-    width: f32,
-    height: f32,
-    lane: usize,
-    y: f32,
-    delta_seconds: f64,
-) {
-    let x = layout.lane_x(lane) + 8.0;
-    let rect_width = layout.lane_width - 16.0;
-    push_rect(
-        bytes,
-        (width, height),
-        x,
-        y - 7.0,
-        rect_width,
-        14.0,
-        note_color(delta_seconds),
-    );
-}
-
-fn draw_hold(
-    bytes: &mut Vec<u8>,
-    layout: &WgpuHighwayLayout,
-    surface_size: (f32, f32),
-    lane: usize,
-    start_y: f32,
-    end_y: f32,
-    delta_seconds: f64,
-) {
-    let first_y = end_y
-        .min(start_y)
-        .clamp(TOP_PAD, layout.height - BOTTOM_PAD);
-    let last_y = end_y
-        .max(start_y)
-        .clamp(TOP_PAD, layout.height - BOTTOM_PAD);
-    let x = layout.lane_x(lane) + layout.lane_width * 0.5 - 8.0;
-    push_rect(
-        bytes,
-        surface_size,
-        x,
-        first_y,
-        16.0,
-        (last_y - first_y).max(8.0),
-        rgba(0.24, 0.45, 0.75, 1.0),
-    );
-    draw_tap(
-        bytes,
-        layout,
-        surface_size.0,
-        surface_size.1,
-        lane,
-        start_y,
-        delta_seconds,
-    );
-}
-
-fn draw_progress(
-    bytes: &mut Vec<u8>,
-    width: f32,
-    height: f32,
-    song_time_seconds: f64,
-    end_seconds: f64,
-) {
-    let progress = if end_seconds > 0.0 {
-        (song_time_seconds / end_seconds).clamp(0.0, 1.0) as f32
-    } else {
-        0.0
-    };
-    let bar_width = width - 48.0;
-    let y = height - 30.0;
-    push_rect(
-        bytes,
-        (width, height),
-        24.0,
-        y,
-        bar_width,
-        8.0,
-        rgba(0.16, 0.19, 0.22, 1.0),
-    );
-    push_rect(
-        bytes,
-        (width, height),
-        24.0,
-        y,
-        (bar_width * progress).max(1.0),
-        8.0,
-        rgba(0.38, 0.75, 0.69, 1.0),
-    );
-}
-
-fn push_rect(
-    bytes: &mut Vec<u8>,
-    surface_size: (f32, f32),
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    color: [f32; 4],
-) {
-    if width <= 0.0 || height <= 0.0 {
-        return;
-    }
-
-    let (surface_width, surface_height) = surface_size;
-    let x0 = pixel_x_to_ndc(x, surface_width);
-    let x1 = pixel_x_to_ndc(x + width, surface_width);
-    let y0 = pixel_y_to_ndc(y, surface_height);
-    let y1 = pixel_y_to_ndc(y + height, surface_height);
-    push_vertex(bytes, x0, y0, color);
-    push_vertex(bytes, x1, y0, color);
-    push_vertex(bytes, x1, y1, color);
-    push_vertex(bytes, x0, y0, color);
-    push_vertex(bytes, x1, y1, color);
-    push_vertex(bytes, x0, y1, color);
-}
-
-fn push_vertex(bytes: &mut Vec<u8>, x: f32, y: f32, color: [f32; 4]) {
-    for value in [x, y, color[0], color[1], color[2], color[3]] {
-        bytes.extend_from_slice(&value.to_ne_bytes());
-    }
-}
-
-fn pixel_x_to_ndc(x: f32, width: f32) -> f32 {
-    x / width * 2.0 - 1.0
-}
-
-fn pixel_y_to_ndc(y: f32, height: f32) -> f32 {
-    1.0 - y / height * 2.0
-}
-
-fn note_color(delta_seconds: f64) -> [f32; 4] {
-    if delta_seconds < -0.050 {
-        rgba(0.77, 0.29, 0.29, 1.0)
-    } else if delta_seconds.abs() <= 0.050 {
-        rgba(0.45, 0.86, 0.56, 1.0)
-    } else {
-        rgba(0.37, 0.80, 0.85, 1.0)
-    }
-}
-
-const fn rgba(r: f32, g: f32, b: f32, a: f32) -> [f32; 4] {
-    [r, g, b, a]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{WgpuHighwayLayout, pixel_x_to_ndc, pixel_y_to_ndc};
-
-    #[test]
-    fn converts_pixels_to_ndc() {
-        assert_eq!(pixel_x_to_ndc(0.0, 100.0), -1.0);
-        assert_eq!(pixel_x_to_ndc(100.0, 100.0), 1.0);
-        assert_eq!(pixel_y_to_ndc(0.0, 100.0), 1.0);
-        assert_eq!(pixel_y_to_ndc(100.0, 100.0), -1.0);
-    }
-
-    #[test]
-    fn lays_out_lanes_with_stable_widths() {
-        let layout = WgpuHighwayLayout::new(960.0, 640.0, 4);
-
-        assert_eq!(layout.lane_count, 4);
-        assert!(layout.lane_width >= 52.0);
-        assert!(layout.judgement_y > 500.0);
-    }
 }

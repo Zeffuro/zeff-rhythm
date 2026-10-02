@@ -1,8 +1,10 @@
+use super::persistence::CalibrationDeviceKey;
 use crate::play::LiveRunSummary;
 use crate::play::metrics::{MetricStats, trimmed_mean};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CalibrationHistory {
+    device_key: Option<CalibrationDeviceKey>,
     attempts: usize,
     trials: Vec<CalibrationTrial>,
 }
@@ -38,6 +40,15 @@ pub enum CalibrationConfidence {
 
 impl CalibrationHistory {
     pub fn record_run(&mut self, summary: &LiveRunSummary) -> bool {
+        let key = CalibrationDeviceKey::from_audio(&summary.audio);
+        if !self
+            .device_key
+            .as_ref()
+            .is_some_and(|previous| previous.same_stream_as(&key))
+        {
+            self.clear();
+        }
+        self.device_key = Some(key);
         self.attempts += 1;
 
         let Some(trial) = CalibrationTrial::from_run(summary) else {
@@ -49,12 +60,17 @@ impl CalibrationHistory {
     }
 
     pub fn clear(&mut self) {
+        self.device_key = None;
         self.attempts = 0;
         self.trials.clear();
     }
 
     pub fn attempts(&self) -> usize {
         self.attempts
+    }
+
+    pub fn device_key(&self) -> Option<&CalibrationDeviceKey> {
+        self.device_key.as_ref()
     }
 
     pub fn aggregate(&self) -> Option<CalibrationAggregate> {
@@ -200,6 +216,37 @@ mod tests {
 
         assert!(!history.record_run(&summary));
 
+        assert_eq!(history.attempts(), 1);
+        assert!(history.aggregate().is_none());
+    }
+
+    #[test]
+    fn different_devices_do_not_pool_trials() {
+        let mut history = CalibrationHistory::default();
+        let mut first = summary(0.0, -20.0, 12);
+        first.audio.device_id = Some("device-a".to_owned());
+        let mut second = summary(0.0, -80.0, 12);
+        second.audio.device_id = Some("device-b".to_owned());
+        history.record_run(&first);
+        history.record_run(&second);
+        let aggregate = history.aggregate().unwrap();
+        assert_eq!(aggregate.suggested_offset_ms, 80.0);
+        assert_eq!(aggregate.trial_count, 1);
+        assert_eq!(
+            history.device_key().unwrap().cpal_device_id.as_deref(),
+            Some("device-b")
+        );
+    }
+
+    #[test]
+    fn changed_stream_without_hits_cannot_reuse_previous_trials() {
+        let mut history = CalibrationHistory::default();
+        let first = summary(0.0, -20.0, 12);
+        history.record_run(&first);
+        let mut second = summary(0.0, 0.0, 0);
+        second.audio.sample_rate = 48_000;
+        second.report.hit_delta_ms = None;
+        assert!(!history.record_run(&second));
         assert_eq!(history.attempts(), 1);
         assert!(history.aggregate().is_none());
     }

@@ -33,7 +33,7 @@ impl TerminalInputBackend {
                 output.push(NativeInputEvent {
                     kind,
                     source: NativeInputSource::Terminal,
-                    timestamp_kind: NativeInputTimestampKind::ReceiptTime,
+                    timestamp_kind: NativeInputTimestampKind::ReceiptMonotonic,
                     event_time: received_time,
                     received_time,
                     source_timestamp_ns: None,

@@ -9,6 +9,7 @@ use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeInputBackendKind {
+    Winit,
     Terminal,
     Sdl,
 }
@@ -24,6 +25,7 @@ impl NativeInputBackendKind {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Winit => "winit",
             Self::Terminal => "terminal",
             Self::Sdl => "sdl",
         }
@@ -38,6 +40,9 @@ pub enum NativeInputBackend {
 impl NativeInputBackend {
     pub fn new(kind: NativeInputBackendKind) -> Result<Self, Box<dyn Error>> {
         match kind {
+            NativeInputBackendKind::Winit => {
+                Err("winit input is owned by the app event loop; use `app` or `app-wgpu`".into())
+            }
             NativeInputBackendKind::Terminal => Ok(Self::Terminal(TerminalInputBackend::new()?)),
             NativeInputBackendKind::Sdl => Ok(Self::Sdl(SdlInputBackend::new()?)),
         }
@@ -88,17 +93,47 @@ impl NativeInputSource {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeInputTimestampKind {
-    ReceiptTime,
-    SourceEventTime,
+    ReceiptMonotonic,
+    QueueTimestampMs,
+    SdlTicksNs,
+    PlatformNativeHighRes,
 }
 
 impl NativeInputTimestampKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ReceiptTime => "receipt_time",
-            Self::SourceEventTime => "source_event_time",
+            Self::ReceiptMonotonic => "receipt_monotonic",
+            Self::QueueTimestampMs => "queue_timestamp_ms",
+            Self::SdlTicksNs => "sdl_ticks_ns",
+            Self::PlatformNativeHighRes => "platform_native_high_res",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativeInputTimestampKind;
+
+    #[test]
+    fn timestamp_kinds_have_stable_log_labels() {
+        assert_eq!(
+            NativeInputTimestampKind::ReceiptMonotonic.as_str(),
+            "receipt_monotonic"
+        );
+        assert_eq!(
+            NativeInputTimestampKind::QueueTimestampMs.as_str(),
+            "queue_timestamp_ms"
+        );
+        assert_eq!(
+            NativeInputTimestampKind::SdlTicksNs.as_str(),
+            "sdl_ticks_ns"
+        );
+        assert_eq!(
+            NativeInputTimestampKind::PlatformNativeHighRes.as_str(),
+            "platform_native_high_res"
+        );
     }
 }

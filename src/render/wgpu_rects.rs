@@ -123,6 +123,15 @@ impl WgpuRectRenderer {
         surface: &mut WgpuSurfaceState,
         frame: WgpuRectFrame<'_>,
     ) -> Result<WgpuRectRenderSample, WgpuFrameError> {
+        self.render_with_artwork(surface, frame, None)
+    }
+
+    pub fn render_with_artwork(
+        &mut self,
+        surface: &mut WgpuSurfaceState,
+        frame: WgpuRectFrame<'_>,
+        artwork: Option<&super::wgpu_artwork::WgpuArtworkRenderer>,
+    ) -> Result<WgpuRectRenderSample, WgpuFrameError> {
         let surface_frame = surface.begin_frame()?;
         let acquire_surface_ms = surface_frame.acquire_surface_ms;
         let width = surface.config.width.max(1) as f32;
@@ -160,6 +169,9 @@ impl WgpuRectRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(artwork) = artwork {
+                artwork.draw(&mut pass);
+            }
             if vertex_count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));

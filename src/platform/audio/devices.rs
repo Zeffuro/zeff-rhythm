@@ -209,7 +209,10 @@ fn selected_host(selection: &AudioDeviceSelection) -> Result<(String, Host), Box
             let host_id = HostId::from_str(host)?;
             Ok((host_id.name().to_owned(), cpal::host_from_id(host_id)?))
         }
-        None => Ok(("default".to_owned(), cpal::default_host())),
+        None => {
+            let host = cpal::default_host();
+            Ok((host.id().name().to_owned(), host))
+        }
     }
 }
 

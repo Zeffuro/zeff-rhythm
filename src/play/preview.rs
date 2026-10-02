@@ -1,4 +1,4 @@
-use super::{PlaySessionOptions, load_chart};
+use super::{PlaySessionOptions, load_chart_at_index};
 use rhythm_core::{Chart, NoteKind};
 use std::error::Error;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ pub fn load_play_session_preview(
         Some(format) => format,
         None => super::ChartFormat::detect(&options.chart_path)?,
     };
-    let chart = load_chart(&options.chart_path, chart_format)?;
+    let chart = load_chart_at_index(&options.chart_path, chart_format, options.chart_index)?;
     let metadata = chart.metadata();
     let hold_count = chart
         .notes()
@@ -82,6 +82,7 @@ mod tests {
         .unwrap();
 
         let preview = load_play_session_preview(&PlaySessionOptions {
+            chart_index: 0,
             chart_path: path.clone(),
             format: None,
             audio_path: None,
@@ -91,10 +92,11 @@ mod tests {
             lead_in_seconds: None,
             chart_start_seconds: None,
             start_delay_seconds: None,
-            display: PlayDisplayMode::Sdl,
-            input: NativeInputBackendKind::Sdl,
+            display: PlayDisplayMode::AppWgpu,
+            input: NativeInputBackendKind::Winit,
             event_log_path: None,
             dry_run: false,
+            volume: 1.0,
             audio: Default::default(),
         })
         .unwrap();

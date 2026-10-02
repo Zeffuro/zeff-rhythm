@@ -9,6 +9,8 @@ use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
+const MAX_INITIAL_ALLOCATION_BYTES: usize = 128 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct AudioClip {
     pub samples: Vec<f32>,
@@ -72,7 +74,7 @@ pub fn load_audio_clip(path: &Path) -> Result<AudioClip, Box<dyn Error>> {
         MetadataOptions::default(),
     )?;
 
-    let (track_id, mut decoder) = {
+    let (track_id, frame_count_hint, mut decoder) = {
         let track = format
             .default_track(TrackType::Audio)
             .ok_or("audio file has no audio track")?;
@@ -84,7 +86,7 @@ pub fn load_audio_clip(path: &Path) -> Result<AudioClip, Box<dyn Error>> {
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(audio_params, &AudioDecoderOptions::default())?;
 
-        (track.id, decoder)
+        (track.id, track.num_frames, decoder)
     };
 
     let mut samples = Vec::new();
@@ -120,19 +122,26 @@ pub fn load_audio_clip(path: &Path) -> Result<AudioClip, Box<dyn Error>> {
             (None, None) => {
                 sample_rate = Some(decoded.spec().rate());
                 channels = Some(decoded_channels);
+                samples.try_reserve_exact(initial_sample_capacity(
+                    frame_count_hint,
+                    decoded_channels,
+                ))?;
             }
             (Some(rate), Some(count))
                 if rate == decoded.spec().rate() && count == decoded_channels => {}
             _ => return Err("audio format changed while decoding".into()),
         }
 
-        let mut chunk = vec![0.0f32; decoded.samples_interleaved()];
-        decoded.copy_to_slice_interleaved(&mut chunk);
-        samples.extend_from_slice(&chunk);
+        let start = samples.len();
+        samples.resize(start + decoded.samples_interleaved(), 0.0f32);
+        decoded.copy_to_slice_interleaved(&mut samples[start..]);
     }
 
     let sample_rate = sample_rate.ok_or("audio decode produced no samples")?;
     let channels = channels.ok_or("audio decode produced no channels")?;
+
+    // The cache counts retained allocation, including unused growth capacity.
+    samples.shrink_to_fit();
 
     Ok(AudioClip {
         samples,
@@ -140,3 +149,15 @@ pub fn load_audio_clip(path: &Path) -> Result<AudioClip, Box<dyn Error>> {
         sample_rate,
     })
 }
+
+fn initial_sample_capacity(frame_count: Option<u64>, channels: usize) -> usize {
+    // Metadata is only a bounded hint; larger clips still grow while decoding.
+    frame_count
+        .and_then(|frames| usize::try_from(frames).ok())
+        .and_then(|frames| frames.checked_mul(channels))
+        .filter(|samples| *samples <= MAX_INITIAL_ALLOCATION_BYTES / size_of::<f32>())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests;

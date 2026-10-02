@@ -1,7 +1,7 @@
 use super::metrics::{MetricStats, print_metric};
-use crate::platform::input::NativeInputEvent;
+use crate::platform::input::{NativeInputEvent, NativeInputTimestampKind};
 use crate::render::telemetry::{RenderTelemetry, RenderTimingSample};
-use rhythm_core::JudgementResult;
+use rhythm_core::{HitRating, JudgementPhase, JudgementResult};
 use std::error::Error;
 use std::fs::{File, create_dir_all};
 use std::io::{BufWriter, Write};
@@ -17,9 +17,11 @@ pub struct PlayReport {
     focus_lost: usize,
     unmatched_inputs: usize,
     misses: usize,
+    hits: usize,
     hit_delta_ms: Vec<f64>,
     abs_hit_delta_ms: Vec<f64>,
     input_queue_age_ms: Vec<f64>,
+    input_timestamp_kind: Option<NativeInputTimestampKind>,
     frame_time_ms: Vec<f64>,
     render_cost_ms: Vec<f64>,
     audio_output_latency_ms: Vec<f64>,
@@ -46,6 +48,7 @@ pub struct PlayReportSummary {
     pub audio_output_latency_ms: Option<MetricStats>,
     pub render_frame_samples: usize,
     pub render_gpu_samples: usize,
+    pub input_timestamp_kind: Option<&'static str>,
 }
 
 impl PlayReport {
@@ -65,9 +68,11 @@ impl PlayReport {
             focus_lost: 0,
             unmatched_inputs: 0,
             misses: 0,
+            hits: 0,
             hit_delta_ms: Vec::new(),
             abs_hit_delta_ms: Vec::new(),
             input_queue_age_ms: Vec::new(),
+            input_timestamp_kind: None,
             frame_time_ms: Vec::new(),
             render_cost_ms: Vec::new(),
             audio_output_latency_ms: Vec::new(),
@@ -144,6 +149,9 @@ impl PlayReport {
         result: JudgementResult,
         input: NativeInputEvent,
     ) -> Result<(), Box<dyn Error>> {
+        if result.is_final() {
+            self.hits += 1;
+        }
         if let Some(delta_seconds) = result.delta_seconds {
             let delta_ms = delta_seconds * 1_000.0;
             self.hit_delta_ms.push(delta_ms);
@@ -152,7 +160,11 @@ impl PlayReport {
 
         if let Some(event_log) = self.event_log.as_mut() {
             event_log.write_row(EventLogRow {
-                event: "hit",
+                event: if result.phase == JudgementPhase::HoldHead {
+                    "hold_head"
+                } else {
+                    "hit"
+                },
                 chart_time_seconds: result.input_time_seconds,
                 lane: Some(result.lane.as_u8()),
                 note_id: Some(result.note_id.as_u32()),
@@ -166,6 +178,42 @@ impl PlayReport {
             })?;
         }
 
+        Ok(())
+    }
+
+    pub fn record_hold_tail(
+        &mut self,
+        result: JudgementResult,
+        input: Option<NativeInputEvent>,
+        observed_time_seconds: f64,
+    ) -> Result<(), Box<dyn Error>> {
+        let missed = result.rating == HitRating::Miss;
+        if missed {
+            self.misses += 1;
+        } else {
+            self.hits += 1;
+        }
+        if let Some(event_log) = self.event_log.as_mut() {
+            event_log.write_row(EventLogRow {
+                event: if missed {
+                    "hold_break"
+                } else {
+                    "hold_complete"
+                },
+                chart_time_seconds: Some(
+                    result.input_time_seconds.unwrap_or(observed_time_seconds),
+                ),
+                lane: Some(result.lane.as_u8()),
+                note_id: Some(result.note_id.as_u32()),
+                rating: Some(format!("{:?}", result.rating)),
+                delta_ms: None,
+                input_queue_age_ms: input.and_then(|input| input.queue_age_ms),
+                input_timestamp_ns: input.and_then(|input| input.source_timestamp_ns),
+                input_source: input.map(|input| input.source.as_str()),
+                input_timestamp_kind: input.map(|input| input.timestamp_kind.as_str()),
+                scheduled_time_seconds: Some(result.scheduled_time_seconds),
+            })?;
+        }
         Ok(())
     }
 
@@ -239,7 +287,7 @@ impl PlayReport {
             self.focus_gained,
             self.focus_lost,
             self.unmatched_inputs,
-            self.hit_delta_ms.len(),
+            self.hits,
             self.misses
         );
         print_metric("hit_delta_ms", &self.hit_delta_ms);
@@ -264,7 +312,7 @@ impl PlayReport {
             focus_gained: self.focus_gained,
             focus_lost: self.focus_lost,
             unmatched_inputs: self.unmatched_inputs,
-            hits: self.hit_delta_ms.len(),
+            hits: self.hits,
             misses: self.misses,
             hit_delta_ms: MetricStats::from_samples(&self.hit_delta_ms),
             hit_delta_samples_ms: self.hit_delta_ms.clone(),
@@ -275,6 +323,9 @@ impl PlayReport {
             audio_output_latency_ms: MetricStats::from_samples(&self.audio_output_latency_ms),
             render_frame_samples: self.render_telemetry.frame_sample_count(),
             render_gpu_samples: self.render_telemetry.gpu_sample_count(),
+            input_timestamp_kind: self
+                .input_timestamp_kind
+                .map(NativeInputTimestampKind::as_str),
         }
     }
 
@@ -286,7 +337,36 @@ impl PlayReport {
         Ok(())
     }
 
+    pub(crate) fn record_transport(
+        &mut self,
+        event: &'static str,
+        chart_time_seconds: f64,
+    ) -> Result<(), Box<dyn Error>> {
+        self.write_focus_state_event(event, chart_time_seconds)
+    }
+
+    pub(crate) fn record_paused_input(
+        &mut self,
+        lane: u8,
+        pressed: bool,
+        input: NativeInputEvent,
+        chart_time_seconds: f64,
+    ) -> Result<(), Box<dyn Error>> {
+        self.write_input_event(
+            if pressed {
+                "paused_input_press"
+            } else {
+                "paused_input_release"
+            },
+            lane,
+            input,
+            chart_time_seconds,
+        )
+    }
+
     fn record_input_queue_age(&mut self, input: NativeInputEvent) {
+        self.input_timestamp_kind
+            .get_or_insert(input.timestamp_kind);
         if let Some(queue_age_ms) = input.queue_age_ms {
             self.input_queue_age_ms.push(queue_age_ms);
         }
@@ -445,3 +525,6 @@ fn format_optional_u32(value: Option<u32>) -> String {
 fn format_optional_u64(value: Option<u64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
 }
+
+#[cfg(test)]
+mod hold_tests;

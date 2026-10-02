@@ -120,7 +120,7 @@ pub fn translate_sdl_event(clock: SdlTimestampClock, event: Event) -> Option<Nat
     Some(NativeInputEvent {
         kind,
         source: NativeInputSource::Sdl,
-        timestamp_kind: NativeInputTimestampKind::SourceEventTime,
+        timestamp_kind: NativeInputTimestampKind::SdlTicksNs,
         event_time,
         received_time,
         source_timestamp_ns: Some(timestamp),

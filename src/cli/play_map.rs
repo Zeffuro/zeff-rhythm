@@ -13,6 +13,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 fn parse_play_map_options(args: &[String]) -> Result<PlaySessionOptions, Box<dyn Error>> {
     let mut chart_path = None;
+    let mut chart_index = 0;
     let mut format = None;
     let mut audio_path = None;
     let mut input_offset_ms = 0.0;
@@ -31,6 +32,12 @@ fn parse_play_map_options(args: &[String]) -> Result<PlaySessionOptions, Box<dyn
     while index < args.len() {
         let arg = &args[index];
         match arg.as_str() {
+            "--chart-index" => {
+                chart_index = parse_u32_arg(
+                    &next_value(args, &mut index, "--chart-index")?,
+                    "chart index",
+                )? as usize;
+            }
             "--format" => {
                 let value = next_value(args, &mut index, "--format")?;
                 format = parse_format_option(&value)?;
@@ -178,6 +185,7 @@ fn parse_play_map_options(args: &[String]) -> Result<PlaySessionOptions, Box<dyn
     };
 
     Ok(PlaySessionOptions {
+        chart_index,
         chart_path,
         format,
         audio_path,
@@ -191,12 +199,13 @@ fn parse_play_map_options(args: &[String]) -> Result<PlaySessionOptions, Box<dyn
         input,
         event_log_path,
         dry_run,
+        volume: 1.0,
         audio,
     })
 }
 
 fn usage() -> &'static str {
-    "usage: zeff-rhythm play-map <chart-path> [--format auto|osu|sm] [--audio PATH] [--input terminal|sdl] [--event-log PATH] [--input-offset-ms MS] [--max-seconds SECONDS] [--display highway|sdl|log] [--lookahead-seconds SECONDS] [--lead-in-seconds SECONDS] [--chart-start-seconds SECONDS] [--start-delay-seconds SECONDS] [--dry-run] [--host HOST] [--device NAME_OR_ID] [--sample-rate HZ] [--buffer FRAMES]"
+    "usage: zeff-rhythm play-map <chart-path> [--format auto|osu|sm] [--chart-index N] [--audio PATH] [--input terminal|sdl] [--event-log PATH] [--input-offset-ms MS] [--max-seconds SECONDS] [--display highway|sdl|log] [--lookahead-seconds SECONDS] [--lead-in-seconds SECONDS] [--chart-start-seconds SECONDS] [--start-delay-seconds SECONDS] [--dry-run] [--host HOST] [--device NAME_OR_ID] [--sample-rate HZ] [--buffer FRAMES]"
 }
 
 fn next_value(args: &[String], index: &mut usize, option: &str) -> Result<String, Box<dyn Error>> {

@@ -36,7 +36,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             .render_latency
             .desired_maximum_frame_latency,
         optional_u32(state.settings.video.target_frame_rate),
-        state.settings.video.lookahead_seconds
+        state.settings.gameplay.scroll_time_seconds()
     );
     println!(
         "diagnostics event_log={} runtime_metrics={} overlay={}",
@@ -54,6 +54,8 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     println!("open_settings={}", screen_name(state.screen));
     state.open_calibration();
     println!("open_calibration={}", screen_name(state.screen));
+    state.open_diagnostics();
+    println!("open_diagnostics={}", screen_name(state.screen));
     state.open_main_menu();
     println!("open_main_menu={}", screen_name(state.screen));
     state.select_chart(ChartSelection::new(
@@ -101,6 +103,7 @@ fn screen_name(screen: AppScreen) -> &'static str {
         AppScreen::Settings(SettingsPanel::Gameplay) => "settings.gameplay",
         AppScreen::Settings(SettingsPanel::Diagnostics) => "settings.diagnostics",
         AppScreen::Calibration => "calibration",
+        AppScreen::Diagnostics => "diagnostics",
         AppScreen::Gameplay => "gameplay",
         AppScreen::Results => "results",
     }
@@ -122,6 +125,7 @@ fn screen_list() -> String {
         AppScreen::SongSelect,
         AppScreen::Settings(SettingsPanel::Audio),
         AppScreen::Calibration,
+        AppScreen::Diagnostics,
         AppScreen::Gameplay,
         AppScreen::Results,
     ]
@@ -143,6 +147,7 @@ fn settings_panel_list() -> String {
 
 fn input_backend_list() -> String {
     [
+        InputBackendPreference::Winit,
         InputBackendPreference::Sdl,
         InputBackendPreference::TerminalDebug,
     ]

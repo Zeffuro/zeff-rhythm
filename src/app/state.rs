@@ -35,6 +35,10 @@ impl AppState {
         self.screen = AppScreen::Calibration;
     }
 
+    pub fn open_diagnostics(&mut self) {
+        self.screen = AppScreen::Diagnostics;
+    }
+
     pub fn select_chart(&mut self, selection: ChartSelection) {
         self.selected_chart = Some(selection);
     }
@@ -71,6 +75,7 @@ pub enum AppScreen {
     SongSelect,
     Settings(SettingsPanel),
     Calibration,
+    Diagnostics,
     Gameplay,
     Results,
 }
@@ -86,6 +91,7 @@ pub enum SettingsPanel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChartSelection {
+    pub chart_index: usize,
     pub chart_path: PathBuf,
     pub audio_path: Option<PathBuf>,
 }
@@ -93,6 +99,7 @@ pub struct ChartSelection {
 impl ChartSelection {
     pub fn new(chart_path: impl Into<PathBuf>) -> Self {
         Self {
+            chart_index: 0,
             chart_path: chart_path.into(),
             audio_path: None,
         }
@@ -161,5 +168,13 @@ mod tests {
         state.open_settings(SettingsPanel::Audio);
 
         assert_eq!(state.screen, AppScreen::Settings(SettingsPanel::Audio));
+    }
+
+    #[test]
+    fn opens_diagnostics_screen() {
+        let mut state = AppState::new();
+        state.open_diagnostics();
+
+        assert_eq!(state.screen, AppScreen::Diagnostics);
     }
 }

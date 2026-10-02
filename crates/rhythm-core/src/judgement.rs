@@ -53,7 +53,15 @@ impl JudgementWindows {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JudgementPhase {
+    Note,
+    HoldHead,
+    HoldTail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JudgementResult {
+    pub phase: JudgementPhase,
     pub note_id: NoteId,
     pub lane: LaneIndex,
     pub rating: HitRating,
@@ -72,6 +80,7 @@ impl JudgementResult {
         rating: HitRating,
     ) -> Self {
         Self {
+            phase: JudgementPhase::Note,
             note_id,
             lane,
             rating,
@@ -83,6 +92,7 @@ impl JudgementResult {
 
     pub const fn miss(note_id: NoteId, lane: LaneIndex, scheduled_time_seconds: f64) -> Self {
         Self {
+            phase: JudgementPhase::Note,
             note_id,
             lane,
             rating: HitRating::Miss,
@@ -90,5 +100,9 @@ impl JudgementResult {
             input_time_seconds: None,
             delta_seconds: None,
         }
+    }
+
+    pub fn is_final(self) -> bool {
+        self.phase != JudgementPhase::HoldHead || self.rating == HitRating::Miss
     }
 }

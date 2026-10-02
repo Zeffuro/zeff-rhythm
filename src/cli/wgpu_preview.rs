@@ -13,6 +13,7 @@ use std::path::PathBuf;
 pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let options = WgpuPreviewCliOptions::parse(args)?;
     let session_options = PlaySessionOptions {
+        chart_index: 0,
         chart_path: options.chart_path,
         format: options.format,
         audio_path: None,
@@ -22,10 +23,11 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         lead_in_seconds: None,
         chart_start_seconds: None,
         start_delay_seconds: None,
-        display: PlayDisplayMode::Sdl,
-        input: NativeInputBackendKind::Sdl,
+        display: PlayDisplayMode::AppWgpu,
+        input: NativeInputBackendKind::Winit,
         event_log_path: None,
         dry_run: true,
+        volume: 1.0,
         audio: Default::default(),
     };
     let run_options = WgpuPreviewRunOptions::new(session_options)

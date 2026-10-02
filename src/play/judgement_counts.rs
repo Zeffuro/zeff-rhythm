@@ -11,6 +11,9 @@ pub struct JudgementCounts {
 
 impl JudgementCounts {
     pub fn add(&mut self, result: JudgementResult) {
+        if !result.is_final() {
+            return;
+        }
         match result.rating {
             HitRating::Marvelous => self.marvelous += 1,
             HitRating::Perfect => self.perfect += 1,

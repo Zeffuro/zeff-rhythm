@@ -1,16 +1,22 @@
+use super::chart_clock::{ChartClock, hard_end_seconds};
+mod input;
+use super::assets::LoadedPlaySession;
 use super::{
-    HighwaySnapshot, JudgementCounts, PlayDisplayMode as PlayDisplay, PlayReport,
-    PlaySessionOptions, SdlPlayWindow, TerminalHighway, active_lanes, judgement_message,
-    load_play_session_assets, push_message,
+    CalibrationPattern, HighwaySnapshot, JudgementCounts, PlayDisplayMode as PlayDisplay,
+    PlayReport, PlaySessionOptions, SdlPlayWindow, TerminalHighway,
+    build_generated_calibration_assets, judgement_message, load_play_session_assets, push_message,
 };
-use crate::platform::audio::{PlaybackClock, build_clip_stream, print_target_summary};
+use crate::platform::audio::{
+    AudioClip, OutputStreamTarget, PlaybackVolume, build_clip_stream_with_volume,
+    print_target_summary,
+};
 use crate::platform::input::{
     NativeInputBackend, NativeInputBackendKind, NativeInputEvent, NativeInputEventKind,
 };
-use cpal::traits::StreamTrait;
+use input::{handle_lane_press, record_judgement, record_message};
 use rhythm_core::{
-    GameKey, InputEvent as CoreInputEvent, JudgementResult, JudgementWindows, LaneIndex, NoteKind,
-    RhythmEngine,
+    Chart, GameKey, InputEvent as CoreInputEvent, JudgementPhase, JudgementResult,
+    JudgementWindows, LaneIndex, NoteKind, RhythmEngine,
 };
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
@@ -32,12 +38,43 @@ pub struct PreparedPlaySessionSummary {
 }
 
 pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error>> {
-    let assets = load_play_session_assets(&options)?;
+    if options.display == PlayDisplay::AppWgpu {
+        return Err("app_wgpu sessions are event-loop owned; use `app` or `app-wgpu`".into());
+    }
 
+    let assets = SessionRunAssets::from(load_play_session_assets(&options)?);
+    run_play_session_with_assets(options, assets)
+}
+
+pub fn run_generated_calibration_session(
+    options: PlaySessionOptions,
+    pattern: CalibrationPattern,
+) -> Result<(), Box<dyn Error>> {
+    if options.display == PlayDisplay::AppWgpu {
+        return Err("app_wgpu sessions are event-loop owned; use `app` or `app-wgpu`".into());
+    }
+
+    let assets = build_generated_calibration_assets(&options.audio, pattern)?;
+    run_play_session_with_assets(
+        options,
+        SessionRunAssets {
+            chart: assets.chart,
+            chart_format_label: "GeneratedCalibration".to_owned(),
+            audio_path_label: assets.audio_label,
+            clip: assets.clip,
+            target: assets.target,
+        },
+    )
+}
+
+fn run_play_session_with_assets(
+    options: PlaySessionOptions,
+    assets: SessionRunAssets,
+) -> Result<(), Box<dyn Error>> {
     println!("play_map={}", options.display.as_str());
-    println!("chart_format={:?}", assets.chart_format);
+    println!("chart_format={}", assets.chart_format_label);
     print_chart_summary(&options.chart_path, &assets.chart);
-    println!("audio_path={}", assets.audio_path.display());
+    println!("audio_path={}", assets.audio_path_label);
     println!(
         "audio_clip=sample_rate={} channels={} frames={} duration={:.6}s",
         assets.clip.sample_rate,
@@ -80,25 +117,28 @@ pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error
         return Ok(());
     }
 
-    let (stream, clock) = build_clip_stream(
-        &assets.target.device,
-        assets.target.config.clone(),
-        assets.target.sample_format,
+    let (stream, clock) = build_clip_stream_with_volume(
+        &assets.target,
         Arc::clone(&assets.clip),
+        PlaybackVolume::new(options.volume),
     )?;
 
     let windows = JudgementWindows::default();
     let chart_start_seconds = options.chart_start_seconds(&assets.chart);
     let hard_end_seconds = match options.max_seconds {
         Some(seconds) => seconds,
-        None => hard_end_seconds(&assets.chart, assets.clip.duration_seconds(), windows),
+        None => hard_end_seconds(
+            &assets.chart,
+            assets.clip.duration_seconds(),
+            windows,
+            options.input_offset_ms,
+        ),
     };
     let mut engine = RhythmEngine::new(assets.chart, windows);
     let mut counts = JudgementCounts::default();
     let mut judged_note_ids = HashSet::new();
     let mut messages = VecDeque::new();
     let mut misses = Vec::new();
-    let mut input_flashes = [None; 4];
     let mut pending_inputs = Vec::new();
     let mut report = PlayReport::new(options.event_log_path.as_deref())?;
     let mut chart_clock = ChartClock::new(
@@ -108,14 +148,17 @@ pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error
     );
     let mut highway = match options.display {
         PlayDisplay::Highway => Some(TerminalHighway::enter(options.lookahead_seconds)?),
-        PlayDisplay::Log | PlayDisplay::Sdl => None,
+        PlayDisplay::AppWgpu | PlayDisplay::Log | PlayDisplay::Sdl => None,
     };
     let mut sdl_window = match options.display {
         PlayDisplay::Sdl => Some(SdlPlayWindow::enter(options.lookahead_seconds)?),
-        PlayDisplay::Highway | PlayDisplay::Log => None,
+        PlayDisplay::AppWgpu | PlayDisplay::Highway | PlayDisplay::Log => None,
     };
 
-    if matches!(options.display, PlayDisplay::Highway | PlayDisplay::Sdl) {
+    if matches!(
+        options.display,
+        PlayDisplay::Highway | PlayDisplay::Sdl | PlayDisplay::AppWgpu
+    ) {
         push_message(
             &mut messages,
             format!(
@@ -170,15 +213,29 @@ pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error
                         &mut counts,
                         &mut judged_note_ids,
                         &mut messages,
-                        &mut input_flashes,
                         &mut report,
-                        options.input_offset_ms,
+                        &options,
                         options.display,
                     )?;
                 }
                 NativeInputEventKind::LaneRelease(lane) => {
                     let input_chart_time = chart_clock.chart_time_at(input.event_time);
                     report.record_input_release(lane, input, input_chart_time)?;
+                    if let Some(result) = engine.submit_input(CoreInputEvent {
+                        key: GameKey::Lane(LaneIndex::new(lane)),
+                        pressed: false,
+                        time_seconds: options.judgement_time_seconds(input_chart_time),
+                    }) {
+                        report.record_hold_tail(result, Some(input), input_chart_time)?;
+                        record_judgement(
+                            "hold end",
+                            result,
+                            &mut counts,
+                            &mut judged_note_ids,
+                            &mut messages,
+                            options.display,
+                        );
+                    }
                 }
                 NativeInputEventKind::FocusGained => {
                     let input_chart_time = chart_clock.chart_time_at(input.event_time);
@@ -192,6 +249,23 @@ pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error
                 NativeInputEventKind::FocusLost => {
                     let input_chart_time = chart_clock.chart_time_at(input.event_time);
                     report.record_focus_lost(input, input_chart_time)?;
+                    for lane in 0..engine.chart().lane_count() {
+                        if let Some(result) = engine.submit_input(CoreInputEvent {
+                            key: GameKey::Lane(LaneIndex::new(lane)),
+                            pressed: false,
+                            time_seconds: options.judgement_time_seconds(input_chart_time),
+                        }) {
+                            report.record_hold_tail(result, Some(input), input_chart_time)?;
+                            record_judgement(
+                                "hold end",
+                                result,
+                                &mut counts,
+                                &mut judged_note_ids,
+                                &mut messages,
+                                options.display,
+                            );
+                        }
+                    }
                     record_message(
                         "sdl focus lost; click window for input".to_owned(),
                         &mut messages,
@@ -204,11 +278,22 @@ pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error
         let chart_time_seconds = chart_clock.chart_time_seconds();
         if !countdown_active {
             misses.clear();
-            engine.collect_misses(chart_time_seconds, &mut misses);
+            engine.collect_judgements(
+                options.judgement_time_seconds(chart_time_seconds),
+                &mut misses,
+            );
             for miss in misses.drain(..) {
-                report.record_miss(miss, chart_time_seconds)?;
+                if miss.phase == JudgementPhase::HoldTail {
+                    report.record_hold_tail(miss, None, chart_time_seconds)?;
+                } else {
+                    report.record_miss(miss, chart_time_seconds)?;
+                }
                 record_judgement(
-                    "miss",
+                    if miss.phase == JudgementPhase::HoldTail {
+                        "hold complete"
+                    } else {
+                        "miss"
+                    },
                     miss,
                     &mut counts,
                     &mut judged_note_ids,
@@ -235,7 +320,6 @@ pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error
                     &counts,
                     &judged_note_ids,
                     &messages,
-                    input_flashes,
                     hard_end_seconds,
                 )?;
                 report.record_render_sample(
@@ -256,7 +340,6 @@ pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error
                     &counts,
                     &judged_note_ids,
                     &messages,
-                    input_flashes,
                     hard_end_seconds,
                 )?;
                 report.record_render_sample(
@@ -297,6 +380,26 @@ pub fn run_play_session(options: PlaySessionOptions) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+struct SessionRunAssets {
+    chart: Chart,
+    chart_format_label: String,
+    audio_path_label: String,
+    clip: Arc<AudioClip>,
+    target: OutputStreamTarget,
+}
+
+impl From<LoadedPlaySession> for SessionRunAssets {
+    fn from(assets: LoadedPlaySession) -> Self {
+        Self {
+            chart: assets.chart,
+            chart_format_label: format!("{:?}", assets.chart_format),
+            audio_path_label: assets.audio_path.display().to_string(),
+            clip: assets.clip,
+            target: assets.target,
+        }
+    }
+}
+
 pub fn prepare_play_session(
     options: &PlaySessionOptions,
 ) -> Result<PreparedPlaySessionSummary, Box<dyn Error>> {
@@ -322,82 +425,6 @@ pub fn prepare_play_session(
     })
 }
 
-struct ChartClock {
-    audio_clock: PlaybackClock,
-    chart_start_seconds: f64,
-    chart_start_wall: Instant,
-    audio_started: bool,
-}
-
-impl ChartClock {
-    fn new(audio_clock: PlaybackClock, chart_start_seconds: f64, start_delay_seconds: f64) -> Self {
-        Self {
-            audio_clock,
-            chart_start_seconds,
-            chart_start_wall: Instant::now() + Duration::from_secs_f64(start_delay_seconds),
-            audio_started: false,
-        }
-    }
-
-    fn chart_time_seconds(&self) -> f64 {
-        if self.audio_started {
-            return self.audio_clock.song_time_seconds();
-        }
-
-        self.chart_time_at(Instant::now())
-    }
-
-    fn chart_time_at(&self, time: Instant) -> f64 {
-        if self.audio_started {
-            return self.audio_clock.song_time_at(time);
-        }
-
-        if time < self.chart_start_wall {
-            return self.chart_start_seconds;
-        }
-
-        self.chart_start_seconds + time.duration_since(self.chart_start_wall).as_secs_f64()
-    }
-
-    fn start_audio_if_due(&mut self, stream: &cpal::Stream) -> Result<(), Box<dyn Error>> {
-        if !self.audio_started && self.chart_time_seconds() >= 0.0 {
-            stream.play()?;
-            self.audio_started = true;
-        }
-
-        Ok(())
-    }
-
-    fn countdown_seconds(&self) -> Option<f64> {
-        let now = Instant::now();
-        if now < self.chart_start_wall {
-            Some(self.chart_start_wall.duration_since(now).as_secs_f64())
-        } else {
-            None
-        }
-    }
-
-    fn scheduled_time_seconds(&self) -> f64 {
-        self.audio_clock.scheduled_time_seconds()
-    }
-
-    fn duration_seconds(&self) -> f64 {
-        self.audio_clock.duration_seconds()
-    }
-
-    fn output_latency_seconds(&self) -> Option<f64> {
-        self.audio_clock.output_latency_seconds()
-    }
-
-    fn is_started(&self) -> bool {
-        self.audio_started && self.audio_clock.is_started()
-    }
-
-    fn is_finished(&self) -> bool {
-        self.audio_started && self.audio_clock.is_finished()
-    }
-}
-
 fn render_highway(
     highway: &mut Option<TerminalHighway>,
     clock: &ChartClock,
@@ -405,7 +432,6 @@ fn render_highway(
     counts: &JudgementCounts,
     judged_note_ids: &HashSet<u32>,
     messages: &VecDeque<String>,
-    input_flashes: [Option<Instant>; 4],
     hard_end_seconds: f64,
 ) -> Result<(), Box<dyn Error>> {
     let Some(highway) = highway.as_mut() else {
@@ -417,7 +443,9 @@ fn render_highway(
         judged_note_ids,
         counts,
         messages,
-        active_lanes: active_lanes(input_flashes),
+        active_lanes: std::array::from_fn(|lane| {
+            engine.lane_is_pressed(LaneIndex::new(lane as u8))
+        }),
         song_time_seconds: clock.chart_time_seconds(),
         scheduled_time_seconds: clock.scheduled_time_seconds(),
         audio_duration_seconds: clock.duration_seconds(),
@@ -435,7 +463,6 @@ fn render_sdl(
     counts: &JudgementCounts,
     judged_note_ids: &HashSet<u32>,
     messages: &VecDeque<String>,
-    input_flashes: [Option<Instant>; 4],
     hard_end_seconds: f64,
 ) -> Result<(), Box<dyn Error>> {
     let Some(sdl_window) = sdl_window.as_mut() else {
@@ -447,7 +474,9 @@ fn render_sdl(
         judged_note_ids,
         counts,
         messages,
-        active_lanes: active_lanes(input_flashes),
+        active_lanes: std::array::from_fn(|lane| {
+            engine.lane_is_pressed(LaneIndex::new(lane as u8))
+        }),
         song_time_seconds: clock.chart_time_seconds(),
         scheduled_time_seconds: clock.scheduled_time_seconds(),
         audio_duration_seconds: clock.duration_seconds(),
@@ -456,125 +485,6 @@ fn render_sdl(
         output_latency_seconds: clock.output_latency_seconds(),
         countdown_seconds: clock.countdown_seconds(),
     })
-}
-
-fn handle_lane_press(
-    lane_number: u8,
-    input: NativeInputEvent,
-    clock: &ChartClock,
-    engine: &mut RhythmEngine,
-    counts: &mut JudgementCounts,
-    judged_note_ids: &mut HashSet<u32>,
-    messages: &mut VecDeque<String>,
-    input_flashes: &mut [Option<Instant>; 4],
-    report: &mut PlayReport,
-    input_offset_ms: f64,
-    display: PlayDisplay,
-) -> Result<(), Box<dyn Error>> {
-    if lane_number >= engine.chart().lane_count() {
-        return Ok(());
-    }
-
-    let lane = LaneIndex::new(lane_number);
-    if lane.as_usize() < input_flashes.len() {
-        input_flashes[lane.as_usize()] = Some(input.received_time);
-    }
-
-    let input_time_seconds = clock.chart_time_at(input.event_time) + input_offset_ms / 1_000.0;
-    let result = engine.submit_input(CoreInputEvent {
-        key: GameKey::Lane(lane),
-        pressed: true,
-        time_seconds: input_time_seconds,
-    });
-
-    match result {
-        Some(result) => {
-            report.record_hit(result, input)?;
-            record_judgement("hit", result, counts, judged_note_ids, messages, display);
-        }
-        None => {
-            report.record_unmatched_input(lane.as_u8(), input, input_time_seconds)?;
-
-            let input_age = input
-                .queue_age_ms
-                .map(|milliseconds| format!(" input_age_ms={milliseconds:.3}"))
-                .unwrap_or_default();
-            let source_timestamp = input
-                .source_timestamp_ns
-                .map(|timestamp| format!(" input_timestamp_ns={timestamp}"))
-                .unwrap_or_default();
-
-            record_message(
-                format!(
-                    "input lane={} song_time={input_time_seconds:.6}s unmatched{input_age}{source_timestamp}",
-                    lane.as_u8()
-                ),
-                messages,
-                display,
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn record_judgement(
-    kind: &str,
-    result: JudgementResult,
-    counts: &mut JudgementCounts,
-    judged_note_ids: &mut HashSet<u32>,
-    messages: &mut VecDeque<String>,
-    display: PlayDisplay,
-) {
-    counts.add(result);
-    judged_note_ids.insert(result.note_id.as_u32());
-
-    match display {
-        PlayDisplay::Log => print_judgement(kind, result),
-        PlayDisplay::Highway | PlayDisplay::Sdl => {
-            push_message(messages, judgement_message(kind, result))
-        }
-    }
-}
-
-fn record_message(message: String, messages: &mut VecDeque<String>, display: PlayDisplay) {
-    match display {
-        PlayDisplay::Log => println!("{message}"),
-        PlayDisplay::Highway | PlayDisplay::Sdl => push_message(messages, message),
-    }
-}
-
-fn hard_end_seconds(
-    chart: &rhythm_core::Chart,
-    clip_duration_seconds: f64,
-    windows: JudgementWindows,
-) -> f64 {
-    chart
-        .notes()
-        .last()
-        .map(|note| note.time_seconds + windows.miss_seconds + 1.0)
-        .unwrap_or(clip_duration_seconds)
-        .max(clip_duration_seconds)
-}
-
-fn print_judgement(kind: &str, result: JudgementResult) {
-    match result.delta_seconds {
-        Some(delta) => println!(
-            "{kind} note={} lane={} rating={:?} scheduled={:.6}s delta_ms={:.3}",
-            result.note_id.as_u32(),
-            result.lane.as_u8(),
-            result.rating,
-            result.scheduled_time_seconds,
-            delta * 1_000.0
-        ),
-        None => println!(
-            "{kind} note={} lane={} rating={:?} scheduled={:.6}s",
-            result.note_id.as_u32(),
-            result.lane.as_u8(),
-            result.rating,
-            result.scheduled_time_seconds
-        ),
-    }
 }
 
 fn print_status(clock: &ChartClock, engine: &RhythmEngine, end: f64) {

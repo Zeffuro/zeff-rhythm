@@ -91,8 +91,12 @@ pub fn build_highway_note_sprites(
                 sprites.push(HighwayNoteSprite {
                     note_id: note.id.as_u32(),
                     lane,
-                    y: layout.y_for_time(note.time_seconds, song_time_seconds),
-                    delta_seconds: note.time_seconds - song_time_seconds,
+                    y: layout.y_for_time(
+                        note.time_seconds
+                            .max(song_time_seconds.min(end_time_seconds)),
+                        song_time_seconds,
+                    ),
+                    delta_seconds: (note.time_seconds - song_time_seconds).max(0.0),
                     kind: HighwayNoteSpriteKind::Hold {
                         end_y: layout.y_for_time(end_time_seconds, song_time_seconds),
                     },
@@ -151,5 +155,20 @@ mod tests {
             sprites[0].kind,
             HighwayNoteSpriteKind::Hold { end_y: 300.0 }
         );
+    }
+
+    #[test]
+    fn sustained_hold_stays_at_the_line_until_final_judgement() {
+        let mut chart = Chart::new(4);
+        chart.push_note(Note::hold(NoteId::new(1), LaneIndex::new(0), 1.0, 3.0));
+        let layout = HighwayRenderLayout::new(4, 4.0, 0.180, 100.0, 500.0);
+        let sprites = build_highway_note_sprites(layout, &chart, &HashSet::new(), 2.0);
+        assert_eq!(sprites.len(), 1);
+        assert_eq!(sprites[0].y, 500.0);
+        assert_eq!(
+            sprites[0].kind,
+            HighwayNoteSpriteKind::Hold { end_y: 400.0 }
+        );
+        assert!(build_highway_note_sprites(layout, &chart, &HashSet::from([1]), 2.0).is_empty());
     }
 }

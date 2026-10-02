@@ -1,6 +1,3 @@
-use crate::render::bitmap_font::{
-    GLYPH_SPACING, GLYPH_WIDTH, glyph_rows, text_height as font_text_height,
-};
 use sdl3::pixels::Color;
 use sdl3::rect::Rect;
 use sdl3::render::Canvas;
@@ -15,46 +12,20 @@ pub fn draw_text(
     scale: u32,
     color: Color,
 ) -> Result<(), Box<dyn Error>> {
-    canvas.set_draw_color(color);
-    let scale_i32 = scale as i32;
-
-    for (index, character) in text.chars().enumerate() {
-        let glyph_x = x + index as i32 * (GLYPH_WIDTH + GLYPH_SPACING) * scale_i32;
-        draw_glyph(canvas, glyph_x, y, character, scale)?;
+    canvas.set_blend_mode(sdl3::render::BlendMode::Blend);
+    for ink in &crate::render::text::line(text, scale).rects {
+        canvas.set_draw_color(Color::RGBA(
+            (u16::from(color.r) * u16::from(ink.color[0]) / 255) as u8,
+            (u16::from(color.g) * u16::from(ink.color[1]) / 255) as u8,
+            (u16::from(color.b) * u16::from(ink.color[2]) / 255) as u8,
+            (u16::from(color.a) * u16::from(ink.color[3]) / 255) as u8,
+        ));
+        canvas.fill_rect(Rect::new(x + ink.x, y + ink.y, ink.width, ink.height))?;
     }
 
     Ok(())
 }
 
 pub fn text_height(scale: u32) -> u32 {
-    font_text_height(scale)
-}
-
-fn draw_glyph(
-    canvas: &mut Canvas<Window>,
-    x: i32,
-    y: i32,
-    character: char,
-    scale: u32,
-) -> Result<(), Box<dyn Error>> {
-    let rows = glyph_rows(character);
-    let scale_i32 = scale as i32;
-
-    for (row_index, row) in rows.iter().copied().enumerate() {
-        for column in 0..GLYPH_WIDTH {
-            let mask = 1 << (GLYPH_WIDTH - 1 - column);
-            if row & mask == 0 {
-                continue;
-            }
-
-            canvas.fill_rect(Rect::new(
-                x + column * scale_i32,
-                y + row_index as i32 * scale_i32,
-                scale,
-                scale,
-            ))?;
-        }
-    }
-
-    Ok(())
+    9 * scale.max(1) + 2
 }

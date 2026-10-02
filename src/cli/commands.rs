@@ -14,11 +14,25 @@ pub struct Command {
 
 const COMMANDS: &[Command] = &[
     Command {
+        name: "library-scan",
+        usage: "library-scan [ROOT ...] [--report CSV] [--verify] [--verify-audio] [--save-roots]",
+        summary: "Discover local osu!mania and StepMania difficulties without opening a window.",
+        details: &[
+            "Scans configured roots when no ROOT is provided. Other osu! modes are counted and skipped.",
+            "Use --report for a complete CSV of charts, skipped modes and import problems.",
+            "Use --verify to check every ready entry's indexed preview for both app launch paths.",
+            "Use --verify-audio to decode every distinct ready audio file without playback.",
+            "Use --save-roots to remember these folders for both app shells.",
+        ],
+        handler: super::library_scan::run,
+    },
+    Command {
         name: "app",
-        usage: "app [--preview|--calibration] [--max-seconds S] [--width PX] [--height PX] [--present fifo|mailbox|immediate] [--frame-latency 1..3] [--power high|low|none]",
+        usage: "app [--library PATH ...] [--preview|--calibration] [--max-seconds S] [--width PX] [--height PX] [--present fifo|mailbox|immediate] [--frame-latency 1..3] [--power high|low|none]",
         summary: "Open the single-window winit/wgpu app shell.",
         details: &[
             "This is the default when running without arguments.",
+            "Use --library PATH repeatedly to remember song folders. Drop a folder into the window or press R in Song Select to rescan.",
             "Use --preview to start directly on the local chart in the same wgpu window.",
             "Use --calibration to start a generated one-lane click test; press D on each click.",
             "Use Up/Down or W/S to move, Enter/Space to open, Esc/Backspace to go back, and Q to quit.",
@@ -29,7 +43,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "app-sdl",
-        usage: "app-sdl",
+        usage: "app-sdl [--library PATH ...]",
         summary: "Open the legacy SDL app scaffold.",
         details: &[
             "This shell is kept as a simple native/menu diagnostic path.",
@@ -39,7 +53,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "app-wgpu",
-        usage: "app-wgpu [--preview|--calibration] [--max-seconds S] [--width PX] [--height PX] [--present fifo|mailbox|immediate] [--frame-latency 1..3] [--power high|low|none]",
+        usage: "app-wgpu [--library PATH ...] [--preview|--calibration] [--max-seconds S] [--width PX] [--height PX] [--present fifo|mailbox|immediate] [--frame-latency 1..3] [--power high|low|none]",
         summary: "Open the single-window winit/wgpu app shell.",
         details: &[
             "Alias for the default app renderer path while the command name remains useful for diagnostics.",
@@ -94,7 +108,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "play-map",
-        usage: "play-map <chart-path> [--format auto|osu|sm] [--audio PATH] [--input terminal|sdl] [--event-log PATH] [--input-offset-ms MS] [--max-seconds SECONDS] [--display highway|sdl|log] [--lookahead-seconds SECONDS] [--lead-in-seconds SECONDS] [--chart-start-seconds SECONDS] [--start-delay-seconds SECONDS] [--dry-run] [--host HOST] [--device NAME_OR_ID] [--sample-rate HZ] [--buffer FRAMES]",
+        usage: "play-map <chart-path> [--format auto|osu|sm] [--chart-index N] [--audio PATH] [--input terminal|sdl] [--event-log PATH] [--input-offset-ms MS] [--max-seconds SECONDS] [--display highway|sdl|log] [--lookahead-seconds SECONDS] [--lead-in-seconds SECONDS] [--chart-start-seconds SECONDS] [--start-delay-seconds SECONDS] [--dry-run] [--host HOST] [--device NAME_OR_ID] [--sample-rate HZ] [--buffer FRAMES]",
         summary: "Play a chart's audio and judge lane input against the audio clock.",
         details: &[
             "Uses D/F/J/K for four lanes. Quit with Esc or Q.",
@@ -109,6 +123,20 @@ const COMMANDS: &[Command] = &[
             "This is a native timing harness, not the final renderer or final input backend.",
         ],
         handler: super::play_map::run,
+    },
+    Command {
+        name: "play-calibration",
+        usage: "play-calibration [--display sdl|highway|log] [--input terminal|sdl] [--event-log PATH|--no-event-log] [--input-offset-ms MS] [--max-seconds SECONDS] [--notes N] [--interval-seconds SECONDS] [--first-note-seconds SECONDS] [--dry-run] [--host HOST] [--device NAME_OR_ID] [--sample-rate HZ] [--buffer FRAMES]",
+        summary: "Play generated calibration clicks through the native timing harness.",
+        details: &[
+            "Defaults to SDL display/input so it can be compared against app-wgpu calibration logs.",
+            "Press D on each generated click. Quit with Esc or Q.",
+            "Uses the same CPAL stream setup, judgement, event-log, and analysis format as play-map.",
+            "Writes .local_runs/calibration-*.csv by default; use --event-log PATH to choose a file or --no-event-log to disable it.",
+            "Use --dry-run to verify generated chart/audio/device setup without starting playback.",
+            "Use --notes, --interval-seconds, and --first-note-seconds to shape the generated test.",
+        ],
+        handler: super::play_calibration::run,
     },
     Command {
         name: "analyze-run",

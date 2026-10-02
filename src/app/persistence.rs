@@ -20,6 +20,7 @@ pub struct AppConfigFile {
     pub version: u32,
     pub settings: AppSettings,
     pub calibration_offsets: Vec<SavedCalibrationOffset>,
+    pub manual_input_offset_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,12 +33,24 @@ pub struct SavedCalibrationOffset {
     pub updated_at_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CalibrationDeviceKey {
-    pub host_name: String,
-    pub device_key: String,
+    pub version: u32,
+    pub audio_host: String,
+    pub cpal_device_id: Option<String>,
+    pub native_device_id: Option<String>,
+    pub stream_direction: String,
     pub sample_rate: u32,
-    pub buffer_frames: Option<u32>,
+    pub requested_buffer_frames: Option<u32>,
+    pub first_callback_frames: Option<u32>,
+    pub channel_count: u16,
+    pub sample_format: String,
+    pub shared_mode: bool,
+    pub exclusive_mode: bool,
+    pub raw_processing: bool,
+    pub match_format: bool,
+    pub device_label: String,
 }
 
 impl AppPersistence {
@@ -75,6 +88,7 @@ impl AppPersistence {
     }
 
     pub fn set_settings(&mut self, settings: &AppSettings) {
+        self.capture_manual_offset();
         self.config.settings = settings.clone();
     }
 
@@ -97,30 +111,47 @@ impl AppPersistence {
         self.save()
     }
 
-    pub fn calibration_for_key(
+    pub fn manual_input_offset_ms(&self) -> f64 {
+        self.config.manual_input_offset_ms.unwrap_or_else(|| {
+            if self.config.calibration_offsets.is_empty() {
+                self.config.settings.input.input_offset_ms
+            } else {
+                0.0
+            }
+        })
+    }
+
+    pub fn set_manual_input_offset_ms(&mut self, offset_ms: f64) {
+        self.config.manual_input_offset_ms = Some(offset_ms);
+    }
+
+    fn capture_manual_offset(&mut self) {
+        if self.config.manual_input_offset_ms.is_none() {
+            self.config.manual_input_offset_ms = Some(self.manual_input_offset_ms());
+        }
+    }
+
+    pub fn calibration_for_audio(
         &self,
-        key: &CalibrationDeviceKey,
+        audio: &LiveAudioSummary,
     ) -> Option<&SavedCalibrationOffset> {
+        let resolved = CalibrationDeviceKey::from_audio(audio);
         self.config
             .calibration_offsets
             .iter()
-            .find(|saved| &saved.key == key)
+            .filter(|saved| saved.key.same_stream_as(&resolved))
+            .max_by_key(|saved| saved.updated_at_ms)
     }
 
     pub fn upsert_calibration_offset(
         &mut self,
         saved_offset: SavedCalibrationOffset,
     ) -> Result<(), Box<dyn Error>> {
-        if let Some(existing) = self
-            .config
+        self.capture_manual_offset();
+        self.config
             .calibration_offsets
-            .iter_mut()
-            .find(|saved| saved.key == saved_offset.key)
-        {
-            *existing = saved_offset;
-        } else {
-            self.config.calibration_offsets.push(saved_offset);
-        }
+            .retain(|saved| !saved.key.same_stream_as(&saved_offset.key));
+        self.config.calibration_offsets.push(saved_offset);
 
         self.save()
     }
@@ -132,6 +163,7 @@ impl Default for AppConfigFile {
             version: APP_CONFIG_VERSION,
             settings: AppSettings::default(),
             calibration_offsets: Vec::new(),
+            manual_input_offset_ms: None,
         }
     }
 }
@@ -158,36 +190,49 @@ impl SavedCalibrationOffset {
 impl CalibrationDeviceKey {
     pub fn from_audio(audio: &LiveAudioSummary) -> Self {
         Self {
-            host_name: non_empty_or_default(&audio.host_name, "default"),
-            device_key: audio
-                .device_id
-                .clone()
-                .unwrap_or_else(|| non_empty_or_default(&audio.device_label, "default")),
+            version: 2,
+            audio_host: non_empty_or_default(&audio.host_name, "default"),
+            cpal_device_id: audio.device_id.clone(),
+            native_device_id: None,
+            stream_direction: "output".to_owned(),
             sample_rate: audio.sample_rate,
-            buffer_frames: audio.buffer_frames,
+            requested_buffer_frames: audio.requested_buffer_frames,
+            first_callback_frames: audio
+                .first_callback_frames
+                .and_then(|frames| u32::try_from(frames).ok()),
+            channel_count: audio.channel_count,
+            sample_format: non_empty_or_default(&audio.sample_format, "unknown"),
+            shared_mode: true,
+            exclusive_mode: false,
+            raw_processing: false,
+            match_format: false,
+            device_label: non_empty_or_default(&audio.device_label, "default"),
         }
     }
 
-    pub fn from_settings(settings: &AppSettings) -> Self {
-        Self {
-            host_name: settings
-                .audio
-                .host
-                .clone()
-                .unwrap_or_else(|| "default".to_owned()),
-            device_key: settings
-                .audio
-                .device_id
-                .clone()
-                .or_else(|| settings.audio.device_label.clone())
-                .unwrap_or_else(|| "default".to_owned()),
-            sample_rate: settings.audio.sample_rate.unwrap_or_default(),
-            buffer_frames: settings.audio.buffer_frames,
-        }
+    pub fn same_stream_as(&self, other: &Self) -> bool {
+        // Callback size is an observation, while endpoint and stream format define a profile.
+        let same_id = self.cpal_device_id.is_some() && self.cpal_device_id == other.cpal_device_id;
+        let same_host = self.audio_host == other.audio_host
+            || (same_id && (self.audio_host == "default" || other.audio_host == "default"));
+        self.version == other.version
+            && same_host
+            && self.stream_direction == other.stream_direction
+            && self.cpal_device_id == other.cpal_device_id
+            && self.native_device_id == other.native_device_id
+            && (self.cpal_device_id.is_some() || self.device_label == other.device_label)
+            && self.sample_rate == other.sample_rate
+            && self.requested_buffer_frames == other.requested_buffer_frames
+            && self.channel_count == other.channel_count
+            && self.sample_format == other.sample_format
+            && self.shared_mode == other.shared_mode
+            && self.exclusive_mode == other.exclusive_mode
+            && self.raw_processing == other.raw_processing
+            && self.match_format == other.match_format
     }
 }
 
-fn default_config_path() -> PathBuf {
+pub(crate) fn default_config_path() -> PathBuf {
     if let Some(appdata) = std::env::var_os("APPDATA") {
         return PathBuf::from(appdata)
             .join("zeff-rhythm")
@@ -226,64 +271,4 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{AppPersistence, CalibrationDeviceKey, SavedCalibrationOffset};
-    use crate::play::LiveAudioSummary;
-    use std::fs;
-
-    #[test]
-    fn round_trips_settings_and_calibration_offsets() {
-        let path = temp_config_path_for_test("round-trip");
-        let mut persistence = AppPersistence::load_from_path(path.clone()).unwrap();
-        let mut settings = persistence.settings().clone();
-        settings.input.input_offset_ms = -20.5;
-
-        persistence.save_settings(&settings).unwrap();
-        persistence
-            .upsert_calibration_offset(SavedCalibrationOffset::new(
-                CalibrationDeviceKey {
-                    host_name: "WASAPI".to_owned(),
-                    device_key: "device-id".to_owned(),
-                    sample_rate: 96_000,
-                    buffer_frames: Some(960),
-                },
-                -20.5,
-                72,
-                3,
-                "STABLE",
-            ))
-            .unwrap();
-
-        let loaded = AppPersistence::load_from_path(path.clone()).unwrap();
-
-        assert_eq!(loaded.settings().input.input_offset_ms, -20.5);
-        assert_eq!(loaded.config.calibration_offsets.len(), 1);
-        assert_eq!(loaded.config.calibration_offsets[0].hit_count, 72);
-
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn device_key_prefers_resolved_audio_device_id() {
-        let key = CalibrationDeviceKey::from_audio(&LiveAudioSummary {
-            host_name: "WASAPI".to_owned(),
-            device_label: "Speakers".to_owned(),
-            device_id: Some("wasapi:{device}".to_owned()),
-            sample_rate: 96_000,
-            buffer_frames: Some(960),
-        });
-
-        assert_eq!(key.host_name, "WASAPI");
-        assert_eq!(key.device_key, "wasapi:{device}");
-        assert_eq!(key.sample_rate, 96_000);
-        assert_eq!(key.buffer_frames, Some(960));
-    }
-
-    fn temp_config_path_for_test(label: &str) -> std::path::PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("zeff-rhythm-{label}-{unique}.toml"))
-    }
-}
+mod tests;

@@ -1,4 +1,5 @@
 use crate::play::metrics::{MetricStats, trimmed_mean};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 
@@ -22,6 +23,18 @@ struct RunAnalysis {
     perfect: usize,
     great: usize,
     good: usize,
+    hit_delta_ms: Vec<f64>,
+    abs_hit_delta_ms: Vec<f64>,
+    input_queue_age_ms: Vec<f64>,
+    input_timestamp_kinds: BTreeMap<String, usize>,
+    timestamp_kind_groups: BTreeMap<String, TimestampKindAnalysis>,
+}
+
+#[derive(Default)]
+struct TimestampKindAnalysis {
+    input_events: usize,
+    hits: usize,
+    unmatched_inputs: usize,
     hit_delta_ms: Vec<f64>,
     abs_hit_delta_ms: Vec<f64>,
     input_queue_age_ms: Vec<f64>,
@@ -100,6 +113,15 @@ impl RunAnalysis {
             .extend_from_slice(&other.abs_hit_delta_ms);
         self.input_queue_age_ms
             .extend_from_slice(&other.input_queue_age_ms);
+        for (kind, count) in &other.input_timestamp_kinds {
+            *self.input_timestamp_kinds.entry(kind.clone()).or_default() += count;
+        }
+        for (kind, group) in &other.timestamp_kind_groups {
+            self.timestamp_kind_groups
+                .entry(kind.clone())
+                .or_default()
+                .merge_from(group);
+        }
     }
 
     fn record(&mut self, row: EventLogRow<'_>) {
@@ -107,16 +129,23 @@ impl RunAnalysis {
             "input_press" => {
                 self.input_presses += 1;
                 self.record_input_queue_age(row);
+                self.record_input_timestamp_kind(row);
+                self.record_timestamp_kind_input(row);
             }
             "input_release" => {
                 self.input_releases += 1;
                 self.record_input_queue_age(row);
+                self.record_input_timestamp_kind(row);
+                self.record_timestamp_kind_input(row);
             }
             "focus_initial_gained" => self.initial_focus_gained += 1,
             "focus_initial_lost" => self.initial_focus_lost += 1,
             "focus_gained" => self.focus_gained += 1,
             "focus_lost" => self.focus_lost += 1,
-            "unmatched_input" => self.unmatched_inputs += 1,
+            "unmatched_input" => {
+                self.unmatched_inputs += 1;
+                self.record_timestamp_kind_unmatched(row);
+            }
             "hit" => {
                 self.hits += 1;
                 self.record_rating(row.rating);
@@ -124,8 +153,20 @@ impl RunAnalysis {
                     self.hit_delta_ms.push(delta_ms);
                     self.abs_hit_delta_ms.push(delta_ms.abs());
                 }
+                self.record_timestamp_kind_hit(row);
             }
-            "miss" => {
+            "hold_head" => {
+                if let Some(delta_ms) = row.delta_ms {
+                    self.hit_delta_ms.push(delta_ms);
+                    self.abs_hit_delta_ms.push(delta_ms.abs());
+                }
+                self.record_timestamp_kind_hit(row);
+            }
+            "hold_complete" => {
+                self.hits += 1;
+                self.record_rating(row.rating);
+            }
+            "miss" | "hold_break" => {
                 self.misses += 1;
             }
             _ => {}
@@ -146,6 +187,54 @@ impl RunAnalysis {
         if let Some(queue_age_ms) = row.input_queue_age_ms {
             self.input_queue_age_ms.push(queue_age_ms);
         }
+    }
+
+    fn record_input_timestamp_kind(&mut self, row: EventLogRow<'_>) {
+        if let Some(kind) = row.normalized_input_timestamp_kind() {
+            *self
+                .input_timestamp_kinds
+                .entry(kind.to_owned())
+                .or_default() += 1;
+        }
+    }
+
+    fn record_timestamp_kind_input(&mut self, row: EventLogRow<'_>) {
+        let Some(kind) = row.normalized_input_timestamp_kind() else {
+            return;
+        };
+        let group = self
+            .timestamp_kind_groups
+            .entry(kind.to_owned())
+            .or_default();
+        group.input_events += 1;
+        if let Some(queue_age_ms) = row.input_queue_age_ms {
+            group.input_queue_age_ms.push(queue_age_ms);
+        }
+    }
+
+    fn record_timestamp_kind_hit(&mut self, row: EventLogRow<'_>) {
+        let Some(kind) = row.normalized_input_timestamp_kind() else {
+            return;
+        };
+        let group = self
+            .timestamp_kind_groups
+            .entry(kind.to_owned())
+            .or_default();
+        group.hits += 1;
+        if let Some(delta_ms) = row.delta_ms {
+            group.hit_delta_ms.push(delta_ms);
+            group.abs_hit_delta_ms.push(delta_ms.abs());
+        }
+    }
+
+    fn record_timestamp_kind_unmatched(&mut self, row: EventLogRow<'_>) {
+        let Some(kind) = row.normalized_input_timestamp_kind() else {
+            return;
+        };
+        self.timestamp_kind_groups
+            .entry(kind.to_owned())
+            .or_default()
+            .unmatched_inputs += 1;
     }
 
     fn print_file(&self, path: &str) {
@@ -169,6 +258,8 @@ impl RunAnalysis {
             "input_queue_age_ms",
             &self.input_queue_age_ms,
         );
+        self.print_input_timestamp_kinds("file_input_timestamp_kinds", Some(path));
+        self.print_timestamp_kind_groups("file_timestamp_kind", Some(path));
         self.print_input_diagnostic("file_input_diagnostic", Some(path));
         print_offset_estimate("file", Some(path), &self.hit_delta_ms);
     }
@@ -184,6 +275,8 @@ impl RunAnalysis {
             "input_queue_age_ms",
             &self.input_queue_age_ms,
         );
+        self.print_input_timestamp_kinds("input_timestamp_kinds", None);
+        self.print_timestamp_kind_groups("timestamp_kind", None);
         self.print_input_diagnostic("input_diagnostic", None);
         if self.files > 1 {
             print_aggregate_offset_note(&self.hit_delta_ms);
@@ -232,6 +325,66 @@ impl RunAnalysis {
             );
         }
     }
+
+    fn print_input_timestamp_kinds(&self, label: &str, path: Option<&str>) {
+        let path = path.map(|path| format!(" file={path}")).unwrap_or_default();
+        if self.input_timestamp_kinds.is_empty() {
+            println!("{label}{path}=none");
+            return;
+        }
+
+        let counts = self
+            .input_timestamp_kinds
+            .iter()
+            .map(|(kind, count)| format!("{kind}={count}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        println!("{label}{path} {counts}");
+    }
+
+    fn print_timestamp_kind_groups(&self, label: &str, path: Option<&str>) {
+        let path_label = path.map(|path| format!(" file={path}")).unwrap_or_default();
+        if self.timestamp_kind_groups.is_empty() {
+            println!("{label}_summary{path_label} kind=none");
+            return;
+        }
+
+        for (kind, group) in &self.timestamp_kind_groups {
+            println!(
+                "{label}_summary{path_label} kind={kind} input_events={} hits={} unmatched_inputs={}",
+                group.input_events, group.hits, group.unmatched_inputs
+            );
+            print_timestamp_kind_metric(label, path, kind, "hit_delta_ms", &group.hit_delta_ms);
+            print_timestamp_kind_metric(
+                label,
+                path,
+                kind,
+                "abs_hit_delta_ms",
+                &group.abs_hit_delta_ms,
+            );
+            print_timestamp_kind_metric(
+                label,
+                path,
+                kind,
+                "input_queue_age_ms",
+                &group.input_queue_age_ms,
+            );
+            print_timestamp_kind_offset_estimate(label, path, kind, &group.hit_delta_ms);
+        }
+    }
+}
+
+impl TimestampKindAnalysis {
+    fn merge_from(&mut self, other: &Self) {
+        self.input_events += other.input_events;
+        self.hits += other.hits;
+        self.unmatched_inputs += other.unmatched_inputs;
+        self.hit_delta_ms.extend_from_slice(&other.hit_delta_ms);
+        self.abs_hit_delta_ms
+            .extend_from_slice(&other.abs_hit_delta_ms);
+        self.input_queue_age_ms
+            .extend_from_slice(&other.input_queue_age_ms);
+    }
 }
 
 fn print_scoped_metric(label: &str, path: Option<&str>, name: &str, samples: &[f64]) {
@@ -251,6 +404,56 @@ fn print_scoped_metric(label: &str, path: Option<&str>, name: &str, samples: &[f
         stats.p95,
         stats.p99,
         stats.max
+    );
+}
+
+fn print_timestamp_kind_metric(
+    label: &str,
+    path: Option<&str>,
+    kind: &str,
+    name: &str,
+    samples: &[f64],
+) {
+    let path = path.map(|path| format!(" file={path}")).unwrap_or_default();
+    let Some(stats) = MetricStats::from_samples(samples) else {
+        println!("{label}_metric{path} kind={kind} {name} count=0");
+        return;
+    };
+
+    println!(
+        "{label}_metric{path} kind={kind} {name} count={} mean={:.3} stddev={:.3} min={:.3} p50={:.3} p95={:.3} p99={:.3} max={:.3}",
+        stats.count,
+        stats.mean,
+        stats.stddev,
+        stats.min,
+        stats.p50,
+        stats.p95,
+        stats.p99,
+        stats.max
+    );
+}
+
+fn print_timestamp_kind_offset_estimate(
+    label: &str,
+    path: Option<&str>,
+    kind: &str,
+    hit_delta_ms: &[f64],
+) {
+    let path = path.map(|path| format!(" file={path}")).unwrap_or_default();
+    let Some(stats) = MetricStats::from_samples(hit_delta_ms) else {
+        println!("{label}_suggested_input_offset_adjustment_ms{path} kind={kind}=none");
+        println!("{label}_robust_suggested_input_offset_adjustment_ms{path} kind={kind}=none");
+        return;
+    };
+    let robust_mean = robust_hit_delta_mean_ms(hit_delta_ms).unwrap_or(stats.mean);
+
+    println!(
+        "{label}_suggested_input_offset_adjustment_ms{path} kind={kind}={:.3}",
+        -stats.mean
+    );
+    println!(
+        "{label}_robust_suggested_input_offset_adjustment_ms{path} kind={kind}={:.3}",
+        -robust_mean
     );
 }
 
@@ -294,7 +497,7 @@ fn print_aggregate_offset_note(hit_delta_ms: &[f64]) {
         -robust_mean
     );
     println!(
-        "aggregate_suggested_input_offset_reason=multiple files may use different offsets; use file_suggested_input_offset_adjustment_ms or file_robust_suggested_input_offset_adjustment_ms for calibration"
+        "aggregate_suggested_input_offset_reason=multiple files or timestamp kinds may use different offsets; use file_* or timestamp_kind_* robust suggestions for calibration"
     );
 }
 
@@ -308,6 +511,7 @@ struct EventLogRow<'a> {
     rating: Option<&'a str>,
     delta_ms: Option<f64>,
     input_queue_age_ms: Option<f64>,
+    input_timestamp_kind: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -335,7 +539,19 @@ impl<'a> EventLogRow<'a> {
             rating: nonempty(columns[4]),
             delta_ms: parse_optional_f64(columns[5], "delta_ms")?,
             input_queue_age_ms: parse_optional_f64(columns[6], "input_queue_age_ms")?,
+            input_timestamp_kind: match format {
+                EventLogFormat::Legacy => None,
+                EventLogFormat::Current => nonempty(columns[9]),
+            },
         })
+    }
+
+    fn normalized_input_timestamp_kind(self) -> Option<&'a str> {
+        match self.input_timestamp_kind {
+            Some("receipt_time") => Some("receipt_monotonic"),
+            Some(kind) => Some(kind),
+            None => None,
+        }
     }
 }
 
@@ -355,96 +571,4 @@ fn parse_optional_f64(value: &str, name: &str) -> Result<Option<f64>, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{EventLogFormat, EventLogRow, RunAnalysis};
-
-    #[test]
-    fn parses_hit_rows() {
-        let row = EventLogRow::parse(
-            "hit,1.000000,2,42,Perfect,-12.500,0.200,123,sdl,source_event_time,1.012500",
-            EventLogFormat::Current,
-        )
-        .unwrap();
-
-        assert_eq!(row.event, "hit");
-        assert_eq!(row.rating, Some("Perfect"));
-        assert_eq!(row.delta_ms, Some(-12.5));
-        assert_eq!(row.input_queue_age_ms, Some(0.2));
-    }
-
-    #[test]
-    fn aggregates_hit_metrics() {
-        let mut analysis = RunAnalysis::default();
-        analysis.record(
-            EventLogRow::parse(
-                "hit,1.000000,2,42,Perfect,-12.500,0.200,123,sdl,source_event_time,1.012500",
-                EventLogFormat::Current,
-            )
-            .unwrap(),
-        );
-        analysis.record(
-            EventLogRow::parse(
-                "miss,1.200000,0,43,Miss,,,,,,1.000000",
-                EventLogFormat::Current,
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(analysis.hits, 1);
-        assert_eq!(analysis.misses, 1);
-        assert_eq!(analysis.perfect, 1);
-        assert_eq!(analysis.hit_delta_ms, vec![-12.5]);
-    }
-
-    #[test]
-    fn queue_age_uses_raw_input_rows_only() {
-        let mut analysis = RunAnalysis::default();
-        analysis.record(
-            EventLogRow::parse(
-                "input_press,1.000000,2,,,0.000,0.200,123,sdl,source_event_time,",
-                EventLogFormat::Current,
-            )
-            .unwrap(),
-        );
-        analysis.record(
-            EventLogRow::parse(
-                "hit,1.000000,2,42,Perfect,-12.500,0.200,123,sdl,source_event_time,1.012500",
-                EventLogFormat::Current,
-            )
-            .unwrap(),
-        );
-        analysis.record(
-            EventLogRow::parse(
-                "unmatched_input,1.200000,2,,,0.000,0.300,124,sdl,source_event_time,",
-                EventLogFormat::Current,
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(analysis.input_presses, 1);
-        assert_eq!(analysis.hits, 1);
-        assert_eq!(analysis.unmatched_inputs, 1);
-        assert_eq!(analysis.input_queue_age_ms, vec![0.2]);
-    }
-
-    #[test]
-    fn parses_legacy_rows() {
-        let row = EventLogRow::parse(
-            "hit,1.000000,2,42,Perfect,-12.500,0.200,123,1.012500",
-            EventLogFormat::Legacy,
-        )
-        .unwrap();
-
-        assert_eq!(row.event, "hit");
-        assert_eq!(row.rating, Some("Perfect"));
-        assert_eq!(row.delta_ms, Some(-12.5));
-        assert_eq!(row.input_queue_age_ms, Some(0.2));
-    }
-
-    #[test]
-    fn robust_hit_delta_mean_trims_outliers() {
-        let mean = super::robust_hit_delta_mean_ms(&[-100.0, -2.0, 0.0, 2.0, 100.0]).unwrap();
-
-        assert_eq!(mean, 0.0);
-    }
-}
+mod tests;

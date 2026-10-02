@@ -3,32 +3,79 @@ use super::util::{parse_f64, strip_bom, strip_line_comment};
 use crate::{Beat, Chart, LaneIndex, Note, NoteId, TimingPoint, TimingStop};
 
 pub fn parse_stepmania_sm(input: &str) -> Result<Chart, ImportError> {
+    parse_stepmania_sm_chart(input, 0)
+}
+
+pub fn parse_stepmania_sm_chart(input: &str, index: usize) -> Result<Chart, ImportError> {
+    parse_stepmania_sm_catalog(input)?
+        .into_iter()
+        .nth(index)
+        .ok_or_else(|| ImportError::new(format!("#NOTES chart index {index} is out of range")))?
+}
+
+// Catalog positions retain the original #NOTES ordinal, including invalid charts.
+pub fn parse_stepmania_sm_catalog(
+    input: &str,
+) -> Result<Vec<Result<Chart, ImportError>>, ImportError> {
     let tags = parse_sm_tags(input)?;
     let mut title = String::new();
     let mut artist = String::new();
+    let mut title_translit = None;
+    let mut artist_translit = None;
     let mut audio_filename = None;
+    let mut background_filename = None;
+    let mut banner_filename = None;
+    let mut preview_start_seconds = None;
+    let mut preview_duration_seconds = None;
     let mut offset_seconds = 0.0;
     let mut bpm_changes = Vec::new();
     let mut stops = Vec::new();
-    let mut notes = None;
+    let mut notes = Vec::new();
 
     for tag in tags {
         match tag.key.as_str() {
             "TITLE" => title = tag.value.trim().to_owned(),
             "ARTIST" => artist = tag.value.trim().to_owned(),
+            "TITLETRANSLIT" => title_translit = nonempty(&tag.value),
+            "ARTISTTRANSLIT" => artist_translit = nonempty(&tag.value),
             "MUSIC" => audio_filename = Some(tag.value.trim().to_owned()),
+            "BACKGROUND" => background_filename = nonempty(&tag.value),
+            "BANNER" => banner_filename = nonempty(&tag.value),
+            "SAMPLESTART" => {
+                preview_start_seconds = tag
+                    .value
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite() && *value >= 0.0);
+            }
+            "SAMPLELENGTH" => {
+                preview_duration_seconds = tag
+                    .value
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite() && *value > 0.0);
+            }
             "OFFSET" => offset_seconds = parse_f64(tag.value.trim(), tag.line, "offset")?,
             "BPMS" => bpm_changes = parse_sm_bpms(&tag.value, tag.line)?,
             "STOPS" => stops = parse_sm_stops(&tag.value, tag.line)?,
-            "NOTES" if notes.is_none() => notes = Some((tag.line, tag.value)),
+            "NOTES" => notes.push(tag),
             _ => {}
         }
     }
 
     let mut chart = Chart::new(4);
-    chart.metadata_mut().title = title;
-    chart.metadata_mut().artist = artist;
-    chart.metadata_mut().audio_filename = audio_filename;
+    let metadata = chart.metadata_mut();
+    metadata.title_unicode = title_translit.as_ref().and_then(|_| nonempty(&title));
+    metadata.artist_unicode = artist_translit.as_ref().and_then(|_| nonempty(&artist));
+    metadata.title = title_translit.unwrap_or(title);
+    metadata.artist = artist_translit.unwrap_or(artist);
+    metadata.audio_filename = audio_filename;
+    metadata.background_filename = background_filename;
+    metadata.banner_filename = banner_filename;
+    metadata.preview_start_seconds = preview_start_seconds;
+    metadata.preview_duration_seconds = preview_duration_seconds;
 
     if bpm_changes.is_empty() {
         return Err(ImportError::new("missing #BPMS data"));
@@ -37,10 +84,29 @@ pub fn parse_stepmania_sm(input: &str) -> Result<Chart, ImportError> {
     chart.set_timing_points(sm_timing_points(offset_seconds, bpm_changes));
     chart.set_timing_stops(stops);
 
-    let (line, notes_value) = notes.ok_or_else(|| ImportError::new("missing #NOTES chart"))?;
-    parse_sm_notes(&notes_value, line, &mut chart)?;
+    if notes.is_empty() {
+        return Err(ImportError::new("missing #NOTES chart"));
+    }
 
-    Ok(chart)
+    Ok(notes
+        .into_iter()
+        .map(|tag| {
+            if !tag.terminated {
+                return Err(ImportError::at_line(
+                    tag.line,
+                    "unterminated StepMania tag #NOTES",
+                ));
+            }
+            let mut difficulty_chart = chart.clone();
+            parse_sm_notes(&tag.value, tag.line, &mut difficulty_chart)?;
+            Ok(difficulty_chart)
+        })
+        .collect())
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +114,7 @@ struct SmTag {
     key: String,
     value: String,
     line: usize,
+    terminated: bool,
 }
 
 fn parse_sm_tags(input: &str) -> Result<Vec<SmTag>, ImportError> {
@@ -56,65 +123,89 @@ fn parse_sm_tags(input: &str) -> Result<Vec<SmTag>, ImportError> {
 
     for (line_index, raw_line) in input.lines().enumerate() {
         let line_number = line_index + 1;
-        let line = strip_bom(raw_line);
+        let mut line = strip_bom(raw_line);
 
         if let Some((key, mut value, start_line)) = current.take() {
-            value.push('\n');
-            let (line_value, finished) = take_until_semicolon(line);
-            value.push_str(line_value);
-
-            if finished {
+            if key == "NOTES" && line.trim_start().starts_with('#') {
                 tags.push(SmTag {
                     key,
                     value,
                     line: start_line,
+                    terminated: false,
                 });
             } else {
-                current = Some((key, value, start_line));
+                value.push('\n');
+                let (line_value, remainder) = take_until_semicolon(line);
+                value.push_str(line_value);
+
+                if let Some(remainder) = remainder {
+                    tags.push(SmTag {
+                        key,
+                        value,
+                        line: start_line,
+                        terminated: true,
+                    });
+                    line = remainder;
+                } else {
+                    current = Some((key, value, start_line));
+                    continue;
+                }
+            }
+        }
+
+        loop {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") || !trimmed.starts_with('#') {
+                break;
             }
 
-            continue;
-        }
+            let Some((key, rest)) = trimmed[1..].split_once(':') else {
+                return Err(ImportError::at_line(line_number, "invalid StepMania tag"));
+            };
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") || !trimmed.starts_with('#') {
-            continue;
-        }
-
-        let Some((key, rest)) = trimmed[1..].split_once(':') else {
-            return Err(ImportError::at_line(line_number, "invalid StepMania tag"));
-        };
-
-        let (value, finished) = take_until_semicolon(rest);
-        if finished {
-            tags.push(SmTag {
-                key: key.trim().to_ascii_uppercase(),
-                value: value.to_owned(),
-                line: line_number,
-            });
-        } else {
-            current = Some((
-                key.trim().to_ascii_uppercase(),
-                value.to_owned(),
-                line_number,
-            ));
+            let (value, remainder) = take_until_semicolon(rest);
+            if let Some(remainder) = remainder {
+                tags.push(SmTag {
+                    key: key.trim().to_ascii_uppercase(),
+                    value: value.to_owned(),
+                    line: line_number,
+                    terminated: true,
+                });
+                line = remainder;
+            } else {
+                current = Some((
+                    key.trim().to_ascii_uppercase(),
+                    value.to_owned(),
+                    line_number,
+                ));
+                break;
+            }
         }
     }
 
-    if let Some((key, _, line)) = current {
-        return Err(ImportError::at_line(
-            line,
-            format!("unterminated StepMania tag #{key}"),
-        ));
+    if let Some((key, value, line)) = current {
+        if key == "NOTES" {
+            tags.push(SmTag {
+                key,
+                value,
+                line,
+                terminated: false,
+            });
+        } else {
+            return Err(ImportError::at_line(
+                line,
+                format!("unterminated StepMania tag #{key}"),
+            ));
+        }
     }
 
     Ok(tags)
 }
 
-fn take_until_semicolon(line: &str) -> (&str, bool) {
+fn take_until_semicolon(line: &str) -> (&str, Option<&str>) {
     match line.find(';') {
-        Some(index) => (&line[..index], true),
-        None => (line, false),
+        Some(index) => (&line[..index], Some(&line[index + 1..])),
+        None => (line, None),
     }
 }
 
@@ -202,9 +293,9 @@ fn sm_timing_points(offset_seconds: f64, bpm_changes: Vec<(f64, f64)>) -> Vec<Ti
 fn parse_sm_notes(value: &str, line: usize, chart: &mut Chart) -> Result<(), ImportError> {
     let mut fields = value.splitn(6, ':');
     let chart_type = fields.next().unwrap_or_default().trim();
-    let _description = fields.next();
-    let _difficulty = fields.next();
-    let _meter = fields.next();
+    let description = fields.next().unwrap_or_default().trim();
+    let difficulty = fields.next().unwrap_or_default().trim();
+    let meter = fields.next().unwrap_or_default().trim();
     let _radar = fields.next();
     let note_data = fields
         .next()
@@ -216,6 +307,8 @@ fn parse_sm_notes(value: &str, line: usize, chart: &mut Chart) -> Result<(), Imp
             "only dance-single StepMania charts are supported for now",
         ));
     }
+
+    chart.metadata_mut().difficulty = sm_difficulty_label(description, difficulty, meter);
 
     let mut next_id = 0;
     let mut hold_starts = [None; 4];
@@ -269,80 +362,20 @@ fn parse_sm_notes(value: &str, line: usize, chart: &mut Chart) -> Result<(), Imp
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::NoteKind;
-
-    #[test]
-    fn parses_minimal_stepmania_chart() {
-        let chart = parse_stepmania_sm(
-            r#"
-#TITLE:Probe;
-#ARTIST:Test;
-#MUSIC:probe.mp3;
-#OFFSET:0.250;
-#BPMS:0.000=120.000,4.000=240.000;
-#STOPS:6.000=1.500;
-#NOTES:
-     dance-single:
-     basic:
-     Easy:
-     1:
-     0,0,0,0,0:
-1000
-0100
-0010
-0001
-,
-2000
-0000
-0000
-3000
-;
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(chart.lane_count(), 4);
-        assert_eq!(chart.metadata().title, "Probe");
-        assert_eq!(
-            chart.metadata().audio_filename.as_deref(),
-            Some("probe.mp3")
-        );
-        assert_eq!(chart.timing_stops().len(), 1);
-        assert_eq!(chart.notes().len(), 5);
-        assert_eq!(chart.notes()[0].time_seconds, 0.25);
-        assert_eq!(chart.notes()[3].time_seconds, 1.75);
-        assert_eq!(
-            chart.notes()[4].kind,
-            NoteKind::Hold {
-                end_time_seconds: 4.5
-            }
-        );
+fn sm_difficulty_label(description: &str, difficulty: &str, meter: &str) -> Option<String> {
+    let mut label = [description, difficulty]
+        .into_iter()
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if !meter.is_empty() {
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(&format!("({meter})"));
     }
-
-    #[test]
-    fn reserves_unique_ids_for_holds_before_they_end() {
-        let chart = parse_stepmania_sm(
-            r#"
-#TITLE:Hold Ids;
-#BPMS:0.000=120.000;
-#NOTES:
-     dance-single:
-     basic:
-     Easy:
-     1:
-     0,0,0,0,0:
-2000
-0100
-3000
-;
-"#,
-        )
-        .unwrap();
-
-        let ids: Vec<u32> = chart.notes().iter().map(|note| note.id.as_u32()).collect();
-        assert_eq!(ids, vec![0, 1]);
-    }
+    (!label.is_empty()).then_some(label)
 }
+
+#[cfg(test)]
+mod tests;

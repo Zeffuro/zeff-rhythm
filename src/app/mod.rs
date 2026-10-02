@@ -1,8 +1,11 @@
+pub mod artwork;
 pub mod calibration;
+mod instance;
 pub mod library;
 pub mod native_shell;
 pub mod persistence;
 pub mod settings;
+mod song_preview;
 pub mod state;
 mod ui_text;
 pub mod wgpu_shell;
